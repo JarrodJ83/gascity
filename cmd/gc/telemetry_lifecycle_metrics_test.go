@@ -197,7 +197,7 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 	})
 }
 
-// TestCommitStartFailure_RecordsFailedStartMetricAcrossBranches pins that
+// TestCommitStartFailure_DoesNotDuplicateFailedStartMetricAcrossBranches pins that
 // every failure arm of commitStartFailure — terminal provider error,
 // rate-limit hold, and the generic wake-failure fallthrough (the
 // rollback-pending arm, the actual trust-dialog-abort shape, is covered
@@ -208,7 +208,7 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 // commitStartFailure, before any of these branches fork, so no single arm
 // can skip it or fire it twice; this test guards that invariant directly
 // against each branch instead of relying on it by code inspection.
-func TestCommitStartFailure_RecordsFailedStartMetricAcrossBranches(t *testing.T) {
+func TestCommitStartFailure_DoesNotDuplicateFailedStartMetricAcrossBranches(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
 	newSession := func(t *testing.T, store beads.Store) *beads.Bead {
 		t.Helper()
@@ -292,11 +292,11 @@ func TestCommitStartFailure_RecordsFailedStartMetricAcrossBranches(t *testing.T)
 }
 
 // TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFailedStartMetric
-// reproduces the 2026-09-18 incident (94 folder-trust-dialog aborts on bead
-// oc-fo6, ga-vk4qzh follow-up): a session start that dies before
-// creation_complete on the rollback-pending arm of commitStartFailure must
-// still increment gc.agent.starts.total with status="error", not silently
-// drop the failure. Drives the exact fixture from
+// pins that a session start that dies before creation_complete on the
+// rollback-pending arm of commitStartFailure (the shape produced by a repeated
+// provider start error, e.g. a folder-trust-dialog abort) still increments
+// gc.agent.starts.total with status="error" instead of silently dropping the
+// failure. Drives the exact fixture from
 // TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError through the
 // real reconciler so this pins the production code path, not just the
 // helper.
