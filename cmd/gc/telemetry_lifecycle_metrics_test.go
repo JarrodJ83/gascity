@@ -291,6 +291,130 @@ func TestCommitStartFailure_DoesNotDuplicateFailedStartMetricAcrossBranches(t *t
 	})
 }
 
+// TestExecutePreparedStartWave_RecyclesZombieSession_RecordsCrashMetric extends
+// TestExecutePreparedStartWave_RecyclesZombieSession (session_lifecycle_parallel_test.go):
+// recycling a zombie session (pane up, agent process dead — the shape a
+// folder-trust-dialog abort leaves behind for the next retry to find) during
+// a start retry must increment gc.agent.crashes.total. The raw sp.Stop() call
+// in that recycle branch previously recorded nothing; this is recorded as a
+// crash rather than a stop because gc did not deliberately shut down a live
+// agent here — it discovered and cleared wreckage the agent process's own
+// exit left behind, the same condition the steady-state reconciler's zombie
+// detector already classifies as a crash.
+func TestExecutePreparedStartWave_RecyclesZombieSession_RecordsCrashMetric(t *testing.T) {
+	reader := installManualMetricReader(t)
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	sp.Zombies["test-agent"] = true
+	item := preparedStart{
+		candidate: startCandidate{
+			info: sessionpkg.Info{
+				ID:                  "gc-102",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				Template:            "worker",
+			},
+			tp: TemplateParams{
+				Command:      "claude",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+	if len(results) != 1 || results[0].err != nil {
+		t.Fatalf("expected 1 successful result (zombie recycle must not wedge the start), got %+v", results)
+	}
+
+	points := collectCounterDataPoints(t, reader, "gc.agent.crashes.total")
+	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker"}) {
+		t.Fatalf("gc.agent.crashes.total has no datapoint with agent=worker: %+v", points)
+	}
+}
+
+// TestStopStaleAsyncStartRuntime_RecordsAgentStopMetric verifies that killing
+// a runtime session left over from a superseded async start (a different
+// session generation/instance_token now owns the pending create) increments
+// gc.agent.stops.total with reason "stale-async-start" — a second raw
+// sp.Stop() call that previously recorded nothing. Unlike the zombie-recycle
+// crash above, this is a deliberate stop: the runtime may still be alive and
+// fine, it is simply no longer wanted.
+func TestStopStaleAsyncStartRuntime_RecordsAgentStopMetric(t *testing.T) {
+	const sessionName = "sky"
+	const identity = "helper"
+
+	t.Run("matching stale runtime records the stop", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if err := sp.SetMeta(sessionName, "GC_INSTANCE_TOKEN", "tok-1"); err != nil {
+			t.Fatalf("SetMeta: %v", err)
+		}
+		result := startResult{
+			prepared: preparedStart{
+				candidate: startCandidate{
+					info: sessionpkg.Info{
+						ID:                  "gc-stale-1",
+						SessionNameMetadata: sessionName,
+						InstanceToken:       "tok-1",
+					},
+					tp: TemplateParams{TemplateName: identity},
+				},
+			},
+		}
+		var stderr bytes.Buffer
+		stopStaleAsyncStartRuntime(result, sp, &stderr)
+
+		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": identity, "reason": "stale-async-start", "status": "ok"}) {
+			t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=stale-async-start status=ok: %+v", identity, points)
+		}
+	})
+
+	t.Run("no matching stale runtime records nothing", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		sp := runtime.NewFake()
+		// No sp.Start for sessionName here, so the identity/token match in
+		// runningSessionMatchesPendingCreateInfo fails on its own terms
+		// (rather than short-circuiting on a blank info.ID as the guard above
+		// would) — this exercises the "found a runtime but it isn't the one
+		// this pending create owns" branch, not the trivial empty-ID guard.
+		result := startResult{
+			prepared: preparedStart{
+				candidate: startCandidate{
+					info: sessionpkg.Info{
+						ID:                  "gc-stale-2",
+						SessionNameMetadata: sessionName,
+						InstanceToken:       "tok-1",
+					},
+					tp: TemplateParams{TemplateName: identity},
+				},
+			},
+		}
+		var stderr bytes.Buffer
+		stopStaleAsyncStartRuntime(result, sp, &stderr)
+
+		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
+			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when there is no matching stale runtime to stop", points)
+		}
+	})
+}
+
 // TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFailedStartMetric
 // pins that a session start that dies before creation_complete on the
 // rollback-pending arm of commitStartFailure (the shape produced by a repeated
