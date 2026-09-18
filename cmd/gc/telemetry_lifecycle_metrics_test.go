@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -194,6 +195,103 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 			t.Fatalf("gc.agent.starts.total datapoints = %+v, want none when the durable commit failed", points)
 		}
 	})
+}
+
+// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFailedStartMetric
+// reproduces the 2026-09-18 incident (94 folder-trust-dialog aborts on bead
+// oc-fo6, ga-vk4qzh follow-up): a session start that dies before
+// creation_complete on the rollback-pending arm of commitStartFailure must
+// still increment gc.agent.starts.total with status="error", not silently
+// drop the failure. Drives the exact fixture from
+// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError through the
+// real reconciler so this pins the production code path, not just the
+// helper.
+func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFailedStartMetric(t *testing.T) {
+	reader := installManualMetricReader(t)
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	sp.StartErrors = map[string]error{"sky": fmt.Errorf("start failed")}
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"sky": {
+			Command:      "test-cmd",
+			SessionName:  "sky",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "helper",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	points := collectCounterDataPoints(t, reader, "gc.agent.starts.total")
+	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "helper", "status": "error"}) {
+		t.Fatalf("gc.agent.starts.total has no datapoint with agent=helper status=error: %+v", points)
+	}
+}
+
+// TestCommitStartResult_SuccessDoesNotDuplicateStartMetric guards against a
+// regression where commitStartFailure's new failure-path RecordAgentStart
+// call (added alongside the fix above) could also fire on the success path
+// and double-count gc.agent.starts.total. commitStartFailure is only ever
+// reached from the `result.err != nil` branch of commitStartResultTraced,
+// which returns before falling through to the success tail, so the two call
+// sites are structurally exclusive; this test pins that behavior against a
+// real successful reconcile tick rather than relying on that invariant
+// staying true by inspection alone.
+func TestCommitStartResult_SuccessDoesNotDuplicateStartMetric(t *testing.T) {
+	reader := installManualMetricReader(t)
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&session)
+
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+
+	points := collectCounterDataPoints(t, reader, "gc.agent.starts.total")
+	if len(points) != 1 {
+		t.Fatalf("gc.agent.starts.total datapoints = %+v, want exactly 1 (success must not also trip the failure-path counter)", points)
+	}
+	if points[0].Value != 1 {
+		t.Fatalf("gc.agent.starts.total value = %d, want 1 (no duplicate increment on a single successful start)", points[0].Value)
+	}
+	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker", "status": "ok"}) {
+		t.Fatalf("gc.agent.starts.total has no datapoint with agent=worker status=ok: %+v", points)
+	}
+	if hasDataPointWithStringAttrs(points, map[string]string{"status": "error"}) {
+		t.Fatalf("gc.agent.starts.total must not carry a status=error datapoint on a successful start: %+v", points)
+	}
 }
 
 // TestStopTargetsBounded_RecordsAgentStopMetric verifies both emission
