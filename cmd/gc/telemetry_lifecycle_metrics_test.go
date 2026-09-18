@@ -197,6 +197,100 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 	})
 }
 
+// TestCommitStartFailure_RecordsFailedStartMetricAcrossBranches pins that
+// every failure arm of commitStartFailure — terminal provider error,
+// rate-limit hold, and the generic wake-failure fallthrough (the
+// rollback-pending arm, the actual trust-dialog-abort shape, is covered
+// end-to-end by
+// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFailedStartMetric
+// below) — records gc.agent.starts.total exactly once with status="error".
+// The RecordAgentStart call sits unconditionally at the top of
+// commitStartFailure, before any of these branches fork, so no single arm
+// can skip it or fire it twice; this test guards that invariant directly
+// against each branch instead of relying on it by code inspection.
+func TestCommitStartFailure_RecordsFailedStartMetricAcrossBranches(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
+	newSession := func(t *testing.T, store beads.Store) *beads.Bead {
+		t.Helper()
+		session, err := store.Create(beads.Bead{
+			Title:  "helper",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name": "sky",
+				"state":        "creating",
+			},
+		})
+		if err != nil {
+			t.Fatalf("store.Create: %v", err)
+		}
+		return &session
+	}
+	failResult := func(session *beads.Bead, err error, rollbackPending, rateLimitScreen bool) startResult {
+		return startResult{
+			prepared: preparedStart{
+				candidate: startCandidate{
+					info: seedSessionInfo(*session),
+					tp: TemplateParams{
+						SessionName:  "sky",
+						TemplateName: "helper",
+					},
+				},
+			},
+			err:             err,
+			outcome:         "failed",
+			rollbackPending: rollbackPending,
+			rateLimitScreen: rateLimitScreen,
+		}
+	}
+	assertSingleFailedStart := func(t *testing.T, reader *sdkmetric.ManualReader) {
+		t.Helper()
+		points := collectCounterDataPoints(t, reader, "gc.agent.starts.total")
+		if len(points) != 1 {
+			t.Fatalf("gc.agent.starts.total datapoints = %+v, want exactly 1 (no duplicate, no drop)", points)
+		}
+		if points[0].Value != 1 {
+			t.Fatalf("gc.agent.starts.total value = %d, want 1", points[0].Value)
+		}
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "helper", "status": "error"}) {
+			t.Fatalf("gc.agent.starts.total has no datapoint with agent=helper status=error: %+v", points)
+		}
+	}
+
+	t.Run("terminal provider error records exactly one failed start", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		store := beads.NewMemStore()
+		session := newSession(t, store)
+		result := failResult(session, errors.New("insufficient_quota: account over limit"), false, false)
+		if commitStartResult(result, sessionFrontDoor(store), clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+			t.Fatal("commitStartResult returned true, want false on failure")
+		}
+		assertSingleFailedStart(t, reader)
+	})
+
+	t.Run("rate-limit hold records exactly one failed start", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		store := beads.NewMemStore()
+		session := newSession(t, store)
+		result := failResult(session, errors.New("rate limited"), false, true)
+		if commitStartResult(result, sessionFrontDoor(store), clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+			t.Fatal("commitStartResult returned true, want false on failure")
+		}
+		assertSingleFailedStart(t, reader)
+	})
+
+	t.Run("generic wake failure records exactly one failed start", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		store := beads.NewMemStore()
+		session := newSession(t, store)
+		result := failResult(session, errors.New("start failed: connection refused"), false, false)
+		if commitStartResult(result, sessionFrontDoor(store), clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+			t.Fatal("commitStartResult returned true, want false on failure")
+		}
+		assertSingleFailedStart(t, reader)
+	})
+}
+
 // TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFailedStartMetric
 // reproduces the 2026-09-18 incident (94 folder-trust-dialog aborts on bead
 // oc-fo6, ga-vk4qzh follow-up): a session start that dies before
