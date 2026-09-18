@@ -107,11 +107,11 @@ func TestPassthroughEnvPinsControllerTokenEmpty(t *testing.T) {
 // prefix sweep alone would never forward it, and nothing else short of
 // [workspace.env] does either.
 func TestPassthroughEnvOmitsNonGCVarWithoutOptIn(t *testing.T) {
-	t.Setenv("ENGINEERING_SDLC_REPO_PATH", "/home/gcdev/dev/Engineering.SDLC")
+	t.Setenv("EXAMPLE_TOOL_HOME", "/opt/example-tool")
 
 	got := passthroughEnv()
 
-	if _, ok := got["ENGINEERING_SDLC_REPO_PATH"]; ok {
+	if _, ok := got["EXAMPLE_TOOL_HOME"]; ok {
 		t.Error("passthroughEnv() forwarded a non-GC_ var with no GC_SUPERVISOR_ENV opt-in")
 	}
 }
@@ -121,13 +121,13 @@ func TestPassthroughEnvOmitsNonGCVarWithoutOptIn(t *testing.T) {
 // env — this pins that it also reaches the session sweep, so one list opts a
 // var into both, rather than needing two lists kept in sync by hand.
 func TestPassthroughEnvHonorsSupervisorEnvOptIn(t *testing.T) {
-	t.Setenv("GC_SUPERVISOR_ENV", "ENGINEERING_SDLC_REPO_PATH")
-	t.Setenv("ENGINEERING_SDLC_REPO_PATH", "/home/gcdev/dev/Engineering.SDLC")
+	t.Setenv("GC_SUPERVISOR_ENV", "EXAMPLE_TOOL_HOME")
+	t.Setenv("EXAMPLE_TOOL_HOME", "/opt/example-tool")
 
 	got := passthroughEnv()
 
-	if got["ENGINEERING_SDLC_REPO_PATH"] != "/home/gcdev/dev/Engineering.SDLC" {
-		t.Errorf("passthroughEnv()[ENGINEERING_SDLC_REPO_PATH] = %q, want the opted-in value", got["ENGINEERING_SDLC_REPO_PATH"])
+	if got["EXAMPLE_TOOL_HOME"] != "/opt/example-tool" {
+		t.Errorf("passthroughEnv()[EXAMPLE_TOOL_HOME] = %q, want the opted-in value", got["EXAMPLE_TOOL_HOME"])
 	}
 }
 
@@ -135,13 +135,13 @@ func TestPassthroughEnvHonorsSupervisorEnvOptIn(t *testing.T) {
 // supervisorServiceExplicitEnvKeys' parser) and an unset value for an opted-in
 // key is still omitted, same as the unconditional GC_ sweep.
 func TestPassthroughEnvSupervisorEnvOptInCommaSeparatedOmitsUnset(t *testing.T) {
-	t.Setenv("GC_SUPERVISOR_ENV", "ENGINEERING_SDLC_REPO_PATH,CUSTOM_TOKEN")
-	t.Setenv("ENGINEERING_SDLC_REPO_PATH", "/home/gcdev/dev/Engineering.SDLC")
+	t.Setenv("GC_SUPERVISOR_ENV", "EXAMPLE_TOOL_HOME,CUSTOM_TOKEN")
+	t.Setenv("EXAMPLE_TOOL_HOME", "/opt/example-tool")
 
 	got := passthroughEnv()
 
-	if got["ENGINEERING_SDLC_REPO_PATH"] != "/home/gcdev/dev/Engineering.SDLC" {
-		t.Errorf("passthroughEnv()[ENGINEERING_SDLC_REPO_PATH] = %q, want the opted-in value", got["ENGINEERING_SDLC_REPO_PATH"])
+	if got["EXAMPLE_TOOL_HOME"] != "/opt/example-tool" {
+		t.Errorf("passthroughEnv()[EXAMPLE_TOOL_HOME] = %q, want the opted-in value", got["EXAMPLE_TOOL_HOME"])
 	}
 	if _, ok := got["CUSTOM_TOKEN"]; ok {
 		t.Error("passthroughEnv() should omit an opted-in key that is unset in the environment")
