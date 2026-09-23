@@ -45,6 +45,39 @@ func TestInvocationLabels_OTelAttributes(t *testing.T) {
 	}
 }
 
+// TestInvocationLabels_OTelAttributesEmptyFormulaName verifies that a
+// non-formula session (FormulaName="") still emits 4 OTEL attributes, with
+// formula_name present as an empty string. Cardinality is bounded: the empty
+// string is one fixed key, not N per formula.
+func TestInvocationLabels_OTelAttributesEmptyFormulaName(t *testing.T) {
+	labels := InvocationLabels{
+		AgentName: "rig/polecat-1",
+		Model:     "claude-opus-4-7",
+		Provider:  "claude",
+		// FormulaName intentionally empty (non-formula session)
+	}
+	attrs := labels.toOTel()
+	if len(attrs) != 4 {
+		t.Fatalf("toOTel() = %d attrs, want 4 (formula_name always emitted)", len(attrs))
+	}
+	want := map[attribute.Key]string{
+		"agent_name":   "rig/polecat-1",
+		"model":        "claude-opus-4-7",
+		"provider":     "claude",
+		"formula_name": "",
+	}
+	for _, a := range attrs {
+		expected, ok := want[a.Key]
+		if !ok {
+			t.Errorf("unexpected attr key: %s", a.Key)
+			continue
+		}
+		if got := a.Value.AsString(); got != expected {
+			t.Errorf("attr %s: got %q want %q", a.Key, got, expected)
+		}
+	}
+}
+
 // TestRecordInvocationTokensNoPanicOnZeros verifies the helpers no-op
 // gracefully when nothing to record. Mirrors the pattern used by the
 // existing Record* tests.
