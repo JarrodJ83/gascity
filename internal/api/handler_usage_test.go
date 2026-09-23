@@ -139,6 +139,28 @@ func TestBuildUsageBodySkipsInvalidFactsAndKeepsSessionIDsDistinct(t *testing.T)
 	}
 }
 
+func TestBuildUsageBodyFormulaNamePropagatesToRecentBySession(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	facts := []usage.Fact{
+		{Kind: usage.KindModel, Worker: "rig/worker-a", SessionID: "s-formula", FormulaName: "review", InputTokens: 10, At: now.UnixMilli(), IdempotencyKey: "f1"},
+		{Kind: usage.KindModel, Worker: "rig/worker-b", SessionID: "s-no-formula", InputTokens: 5, At: now.UnixMilli(), IdempotencyKey: "f2"},
+	}
+	body := buildUsageBody(facts, usage.RecentReadReport{}, now)
+	if len(body.RecentBySession) != 2 {
+		t.Fatalf("recent_by_session = %+v, want 2 entries", body.RecentBySession)
+	}
+	byID := make(map[string]UsageSessionRecent)
+	for _, s := range body.RecentBySession {
+		byID[s.SessionID] = s
+	}
+	if got := byID["s-formula"].FormulaName; got != "review" {
+		t.Errorf("FormulaName = %q, want %q", got, "review")
+	}
+	if got := byID["s-no-formula"].FormulaName; got != "" {
+		t.Errorf("FormulaName = %q, want empty for session without formula", got)
+	}
+}
+
 func TestHandleUsageIsRegisteredAndReturnsSanitizedAggregate(t *testing.T) {
 	state := newFakeState(t)
 	state.usageSink = usage.NewLocalSink(filepath.Join(state.cityPath, ".gc", "usage.jsonl"))
