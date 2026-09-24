@@ -347,7 +347,7 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	}
 	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
 
-	f := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
+	f := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
 	if f.At != entryTime.UnixMilli() {
 		t.Fatalf("At = %d, want the entry's own timestamp %d, not now (%d)", f.At, entryTime.UnixMilli(), now.UnixMilli())
 	}
@@ -356,7 +356,7 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	// extraction doesn't populate it) must fall back to now unchanged.
 	uNoTimestamp := u
 	uNoTimestamp.Timestamp = time.Time{}
-	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
+	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
 	if fallback.At != now.UnixMilli() {
 		t.Fatalf("At = %d, want now (%d) when Timestamp is zero", fallback.At, now.UnixMilli())
 	}
