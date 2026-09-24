@@ -195,6 +195,15 @@ func TestNativeDoltStoreMetadataWriteGivesUpAfterRepeatedVersionMismatches(t *te
 	if !errors.Is(err, beadslib.ErrVersionMismatch) {
 		t.Fatalf("SetMetadataBatch error = %v, want ErrVersionMismatch after the retry budget", err)
 	}
+	// Exhausted contention must read as the transient CAS-exhaustion class, so
+	// callers that classify errors re-enter rather than fail the work.
+	var exhausted *CASRetriesExhaustedError
+	if !errors.As(err, &exhausted) {
+		t.Fatalf("SetMetadataBatch error = %v, want it to wrap *CASRetriesExhaustedError", err)
+	}
+	if exhausted.ID != "gc-contended" || exhausted.Key != "requested" || exhausted.Attempts != nativeWriteAttempts {
+		t.Fatalf("CASRetriesExhaustedError = %+v, want ID gc-contended, Key requested, Attempts %d", *exhausted, nativeWriteAttempts)
+	}
 	if getCalls != nativeWriteAttempts || checkedCalls != nativeWriteAttempts {
 		t.Fatalf("calls = GetIssue:%d UpdateIssueChecked:%d, want %d each", getCalls, checkedCalls, nativeWriteAttempts)
 	}
@@ -210,4 +219,33 @@ func slicesEqualInt64(a, b []int64) bool {
 		}
 	}
 	return true
+}
+
+// TestNativeDoltStoreMetadataWriteDoesNotMarkOtherFailuresAsExhausted pins
+// that only a version mismatch that outlived the budget is reported as CAS
+// exhaustion: a serialization conflict that outlives it, or a permanent error,
+// is returned as it was.
+func TestNativeDoltStoreMetadataWriteDoesNotMarkOtherFailuresAsExhausted(t *testing.T) {
+	for name, writeErr := range map[string]error{
+		"serialization conflict": errors.New("Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction"),
+		"permanent":              errors.New("disk full"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			storage := &nativeDoltStorageSpy{
+				getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+					return &beadslib.Issue{ID: "gc-x"}, nil
+				},
+				updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
+					return writeErr
+				},
+			}
+			err := newNativeDoltStoreForTest(storage).SetMetadataBatch("gc-x", map[string]string{"k": "v"})
+			if err == nil {
+				t.Fatal("SetMetadataBatch succeeded, want the write error")
+			}
+			if IsCASRetriesExhausted(err) {
+				t.Fatalf("SetMetadataBatch error = %v, want no CAS-exhaustion wrapping for a non-mismatch failure", err)
+			}
+		})
+	}
 }

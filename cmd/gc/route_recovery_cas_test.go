@@ -238,3 +238,62 @@ func TestRouteRecoveryRestoreClearsAStaleQuarantineAfterTheSwap(t *testing.T) {
 		t.Fatalf("quarantine reason = %q after a passing restore, want cleared", q)
 	}
 }
+
+// casUnsupportedStore advertises the metadata compare-and-set but refuses it
+// at call time, the way a store whose conditional writes are disabled at the
+// instance does (and emittingClassStore over a store without the capability).
+type casUnsupportedStore struct {
+	beads.Store
+	casCalls int
+	batches  []map[string]string
+}
+
+func (s *casUnsupportedStore) CompareAndSetMetadataKey(_, _, _, _ string) (bool, error) {
+	s.casCalls++
+	return false, beads.ErrConditionalWriteUnsupported
+}
+
+func (s *casUnsupportedStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.batches = append(s.batches, kvs)
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestRouteRecoveryFallsBackToTheBatchWriteWhenTheCASIsUnsupported pins the
+// one error that reaches the legacy write: a store that cannot compare-and-set
+// after all still gets its route restored (and a stale quarantine cleared in
+// the same batch), rather than route recovery stopping on it.
+func TestRouteRecoveryFallsBackToTheBatchWriteWhenTheCASIsUnsupported(t *testing.T) {
+	seed := unroutedWorkBead("T-fallback")
+	seed.Metadata[beadmeta.RouteQuarantineMetadataKey] = "true"
+	seed.Metadata[beadmeta.RouteQuarantineReasonMetadataKey] = routeRecoveryQuarantineRestoreFlap
+	backing := beads.NewMemStoreFrom(0, []beads.Bead{seed}, nil)
+	store := &casUnsupportedStore{Store: backing}
+	if _, ok := beads.MetadataCASWriterFor(store); !ok {
+		t.Fatal("fixture does not advertise the metadata CAS; the fallback would not be exercised")
+	}
+	cr := &CityRuntime{cityName: "city", standaloneCityStore: store, stderr: io.Discard}
+
+	report := cr.runRouteRecoveryBackstop(backstopReasonCadence)
+	if report.err != nil || report.restored != 1 {
+		t.Fatalf("pass restored=%d err=%v, want 1 and nil: an unsupported CAS must fall back, not fail", report.restored, report.err)
+	}
+	if store.casCalls != 1 {
+		t.Fatalf("CAS calls = %d, want 1 (tried before falling back)", store.casCalls)
+	}
+	if len(store.batches) != 1 {
+		t.Fatalf("batch writes = %d (%v), want exactly 1: the legacy single write", len(store.batches), store.batches)
+	}
+	want := map[string]string{
+		beadmeta.RoutedToMetadataKey:              routeRecoveryTestPool,
+		beadmeta.RouteQuarantineMetadataKey:       "",
+		beadmeta.RouteQuarantineReasonMetadataKey: "",
+	}
+	for k, v := range want {
+		if got, ok := store.batches[0][k]; !ok || got != v {
+			t.Fatalf("fallback batch %v, want %s=%q in it", store.batches[0], k, v)
+		}
+	}
+	if got := mustRoutedTo(t, backing, "T-fallback"); got != routeRecoveryTestPool {
+		t.Fatalf("gc.routed_to = %q, want %q", got, routeRecoveryTestPool)
+	}
+}

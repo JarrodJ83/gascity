@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1769,11 +1770,35 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	}
 	defer release()
 
-	return retryOnNativeDoltMergeRace(func() error {
+	err = retryOnNativeDoltMergeRace(func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
 		return s.setMetadataBatchOnce(ctx, storage, id, kvs)
 	})
+	if errors.Is(err, beadslib.ErrVersionMismatch) {
+		// Every attempt lost its swap to a concurrent writer: contention, not
+		// a broken bead. Wrapping the exhaustion type lets callers that
+		// classify errors (dispatch's ClassifyControllerError, the drain
+		// reservation retry) re-enter instead of failing the work, while
+		// errors.Is(err, ErrVersionMismatch) still holds.
+		return fmt.Errorf("%w: %w", &CASRetriesExhaustedError{
+			ID:       id,
+			Key:      metadataBatchKeyList(kvs),
+			Attempts: nativeWriteAttempts,
+		}, err)
+	}
+	return err
+}
+
+// metadataBatchKeyList names the keys of a metadata batch, sorted, for error
+// messages.
+func metadataBatchKeyList(kvs map[string]string) string {
+	keys := make([]string, 0, len(kvs))
+	for k := range kvs {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return strings.Join(keys, ",")
 }
 
 // setMetadataBatchOnce performs one complete metadata read-merge-write attempt:
