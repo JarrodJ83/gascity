@@ -2571,8 +2571,19 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		// (logs + returns), so the write-returns-Info fold is discarded — never assign
 		// it back into infoByID (the tick's map, out of scope here). The persist still
 		// lands via markProviderTerminalError's ApplyPatchInfo.
-		if _, markErr := markProviderTerminalError(result.prepared.candidate.info, sessFront, clk, reason); markErr != nil {
-			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
+		//
+		// A rollback-pending row skips the mark entirely: markProviderTerminalError
+		// clears pending_create_claim and parks state=asleep, and
+		// PendingCreateLease.CanRollback then requires current.Claim (now false) or
+		// current.State == StateFailedCreate (it is "asleep") to permit the
+		// rollback — so marking first would make rollbackPendingCreate's own
+		// CanRollback re-read see a lease that can no longer roll back, silently
+		// no-opping the close and stranding the row open forever even though its
+		// runtime was already torn down above.
+		if !result.rollbackPending {
+			if _, markErr := markProviderTerminalError(result.prepared.candidate.info, sessFront, clk, reason); markErr != nil {
+				fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
+			}
 		}
 		if trace != nil {
 			trace.RecordOperation(TraceSiteLifecycleStartTerminalProviderError, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
