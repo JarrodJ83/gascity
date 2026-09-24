@@ -1770,10 +1770,13 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	}
 	defer release()
 
+	// lastRead is the row version the final attempt's read returned, the
+	// version its refused swap expected.
+	var lastRead int64
 	err = retryOnNativeDoltMergeRace(func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
-		return s.setMetadataBatchOnce(ctx, storage, id, kvs)
+		return s.setMetadataBatchOnce(ctx, storage, id, kvs, &lastRead)
 	})
 	if errors.Is(err, beadslib.ErrVersionMismatch) {
 		// Every attempt lost its swap to a concurrent writer: contention, not
@@ -1782,9 +1785,10 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 		// reservation retry) re-enter instead of failing the work, while
 		// errors.Is(err, ErrVersionMismatch) still holds.
 		return fmt.Errorf("%w: %w", &CASRetriesExhaustedError{
-			ID:       id,
-			Key:      metadataBatchKeyList(kvs),
-			Attempts: nativeWriteAttempts,
+			ID:           id,
+			Key:          metadataBatchKeyList(kvs),
+			Attempts:     nativeWriteAttempts,
+			LastRevision: lastRead,
 		}, err)
 	}
 	return err
@@ -1806,7 +1810,10 @@ func metadataBatchKeyList(kvs map[string]string) string {
 // back only while the bead still carries the row version that read returned. A
 // retry must call this whole operation again so metadata committed by the
 // competing writer is merged rather than overwritten from a stale read.
-func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string) error {
+//
+// readVersion receives the row version the read returned, for the caller's
+// exhaustion report.
+func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string, readVersion *int64) error {
 	issue, err := storage.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1822,6 +1829,7 @@ func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage bead
 		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
 	}
 	expected := issue.RowVersion
+	*readVersion = expected
 	return nativeStoreError(id, storage.UpdateIssueChecked(ctx, id, map[string]interface{}{"metadata": raw}, s.actor, beadslib.UpdateIssueOptions{
 		ExpectedVersion: &expected,
 	}))

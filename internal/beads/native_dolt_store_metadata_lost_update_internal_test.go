@@ -201,8 +201,12 @@ func TestNativeDoltStoreMetadataWriteGivesUpAfterRepeatedVersionMismatches(t *te
 	if !errors.As(err, &exhausted) {
 		t.Fatalf("SetMetadataBatch error = %v, want it to wrap *CASRetriesExhaustedError", err)
 	}
-	if exhausted.ID != "gc-contended" || exhausted.Key != "requested" || exhausted.Attempts != nativeWriteAttempts {
-		t.Fatalf("CASRetriesExhaustedError = %+v, want ID gc-contended, Key requested, Attempts %d", *exhausted, nativeWriteAttempts)
+	// The spy's reads return versions 1..nativeWriteAttempts, so the last
+	// refused swap expected nativeWriteAttempts.
+	if exhausted.ID != "gc-contended" || exhausted.Key != "requested" || exhausted.Attempts != nativeWriteAttempts ||
+		exhausted.LastRevision != int64(nativeWriteAttempts) {
+		t.Fatalf("CASRetriesExhaustedError = %+v, want ID gc-contended, Key requested, Attempts %d, LastRevision %d",
+			*exhausted, nativeWriteAttempts, nativeWriteAttempts)
 	}
 	if getCalls != nativeWriteAttempts || checkedCalls != nativeWriteAttempts {
 		t.Fatalf("calls = GetIssue:%d UpdateIssueChecked:%d, want %d each", getCalls, checkedCalls, nativeWriteAttempts)
