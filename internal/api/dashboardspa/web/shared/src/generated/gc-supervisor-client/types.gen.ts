@@ -17697,6 +17697,10 @@ export type SendSessionMessageData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -17951,6 +17955,10 @@ export type RespondSessionData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -18236,6 +18244,10 @@ export type SubmitSessionData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**

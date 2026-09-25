@@ -9970,6 +9970,9 @@ type PostV0CityByCityNameSessionByIdKillParams struct {
 type SendSessionMessageParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdPermissionModeParams defines parameters for PostV0CityByCityNameSessionByIdPermissionMode.
@@ -9988,6 +9991,9 @@ type PostV0CityByCityNameSessionByIdRenameParams struct {
 type RespondSessionParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdStopParams defines parameters for PostV0CityByCityNameSessionByIdStop.
@@ -10018,6 +10024,9 @@ type StreamSessionParamsFormat string
 type SubmitSessionParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdSuspendParams defines parameters for PostV0CityByCityNameSessionByIdSuspend.
@@ -31431,6 +31440,17 @@ func NewSendSessionMessageRequestWithBody(server string, cityName string, id str
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -31673,6 +31693,17 @@ func NewRespondSessionRequestWithBody(server string, cityName string, id string,
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -31903,6 +31934,17 @@ func NewSubmitSessionRequestWithBody(server string, cityName string, id string, 
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 

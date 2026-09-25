@@ -9442,7 +9442,8 @@ export const zPostV0CityByCityNameSessionByIdKillResponse = zOkWithIdResponseBod
 export const zSendSessionMessageBody = zSessionMessageInputBody;
 
 export const zSendSessionMessageHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zSendSessionMessagePath = z.object({
@@ -9500,7 +9501,8 @@ export const zPostV0CityByCityNameSessionByIdRenameResponse = zSessionResponse;
 export const zRespondSessionBody = zSessionRespondInputBody;
 
 export const zRespondSessionHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zRespondSessionPath = z.object({
@@ -9599,7 +9601,8 @@ export const zStreamSessionResponse = z.array(z.union([
 export const zSubmitSessionBody = zSessionSubmitInputBody;
 
 export const zSubmitSessionHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zSubmitSessionPath = z.object({
