@@ -15,6 +15,10 @@ test --flaky_test_attempts=2
 # creatable by any user (CI runners, remote workers, dev machines alike).
 test --test_tmpdir=/tmp/bt
 test --sandbox_writable_path=/tmp/bt
+# /var/tmp is the default TMPDIR fallback in test-gitconfig-path and the
+# Makefile TEST_ENV. Make it writable so bazel-sandboxed scripts tests can
+# create the hermetic gitconfig file there.
+test --sandbox_writable_path=/var/tmp
 
 # GOROOT is resolved hermetically from runfiles (@go_sdk//:srcs) by
 # internal/bazeltest; no client export is required.

@@ -13,6 +13,9 @@ go_library(
 
 go_test(
     name = "gchome_test",
+    # Tests check real filesystem ownership. The bazel linux-sandbox assigns
+    # / to UID 65534 (nobody), causing false failures. Disable sandboxing.
+    tags = ["local"],
     srcs = [
         "gchome_test.go",
         "testenv_import_test.go",

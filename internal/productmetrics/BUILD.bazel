@@ -48,6 +48,10 @@ go_library(
 
 go_test(
     name = "productmetrics_test",
+    # Tests check real filesystem ownership (e.g. / owned by UID 0). The
+    # bazel linux-sandbox assigns / to UID 65534 (nobody), causing false
+    # failures. Run without sandboxing so ownership checks see the real fs.
+    tags = ["local"],
     srcs = [
         "config_state_test.go",
         "control_unix_test.go",
