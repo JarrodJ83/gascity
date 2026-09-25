@@ -164,7 +164,7 @@ func TestBuildUsageBodyFormulaNamePropagatesToRecentBySession(t *testing.T) {
 // TestBuildUsageBodyFormulaNamePreservedByFirstFact verifies that when a session
 // has multiple facts the formula_name captured from the first fact is not
 // overwritten by subsequent facts that have an empty FormulaName. The
-// sessionAccum is initialised on the first fact, so only that fact's FormulaName
+// sessionAccum is initialized on the first fact, so only that fact's FormulaName
 // is captured.
 func TestBuildUsageBodyFormulaNamePreservedByFirstFact(t *testing.T) {
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
