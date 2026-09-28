@@ -94,21 +94,6 @@ type DesiredStateResult struct {
 	// ReadyUnassignedRoutedWorkStoreRefs is index-aligned with
 	// ReadyUnassignedRoutedWorkBeads and uses canonical city:/rig: refs.
 	ReadyUnassignedRoutedWorkStoreRefs []string
-	// OpenRoutedWorkBeads is the BROAD open/unassigned/routed snapshot, before
-	// ReadyUnassignedRoutedWorkBeads narrows it to the rows the default pool
-	// demand probes selected. The seat-claim backstop reads this one because it
-	// settles readiness itself, from each row's own dependency edges rather than
-	// from pool-demand selection: a named seat's routed work is not pool demand,
-	// so the narrowed view can be silent on exactly the rows that lane exists
-	// for. OpenRoutedWorkStores and OpenRoutedWorkStoreRefs are index-aligned
-	// with it, the same contract AssignedWorkStores/StoreRefs carry.
-	OpenRoutedWorkBeads     []beads.Bead
-	OpenRoutedWorkStores    []beads.Store
-	OpenRoutedWorkStoreRefs []string
-	// OpenRoutedWorkQueryPartial is true when the open-routed read above was
-	// incomplete. A missing row makes a seat's own work look absent, so
-	// consumers that act on ABSENCE must disable themselves for that tick.
-	OpenRoutedWorkQueryPartial bool
 	// NamedSessionDemand records which named-session identities have active
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
@@ -171,6 +156,41 @@ type DesiredStateResult struct {
 	SessionSnapshotComplete bool
 	SessionOccupancyInfos   []session.Info
 	BeaconTime              time.Time
+	// ControlDispatcherScopeGaps summarizes, one entry per scope, the open
+	// control work this build suppressed from the demand snapshot because the
+	// scope that owns it configures no control-dispatcher. It is the
+	// machine-readable half of the stderr diagnostic
+	// repairControlDispatcherRoutesForStoreScope prints: the reconciler turns
+	// each entry into one event, so a gap that otherwise only stalls work
+	// silently is countable on the event bus. Empty on a healthy city.
+	ControlDispatcherScopeGaps []ControlDispatcherScopeGap
+}
+
+// ControlDispatcherScopeGap names one scope — the city, or one rig — that owns
+// open control work but configures no control-dispatcher for it, and counts the
+// rows one desired-state build suppressed from the demand snapshot because of
+// it.
+//
+// The count is the field the stderr diagnostic cannot carry: that line names a
+// single bead per scope, so one stuck row and a hundred read identically.
+type ControlDispatcherScopeGap struct {
+	// ScopeLabel is the operator-facing name of the gap — the same text the
+	// stderr diagnostic prints, naming the leg the rows were collected through
+	// and the scope that owns them.
+	ScopeLabel string
+	// RigContext is the owning rig's name; empty means the city owns the rows.
+	RigContext string
+	// StoreRef is the leg the rows were collected through. On a relocated city
+	// that is the class binding, which serves every scope and owns none — which
+	// is why it is reported alongside RigContext, not as the owner.
+	StoreRef string
+	// SuppressedCount is how many control rows this scope had suppressed in
+	// this build.
+	SuppressedCount int
+	// SampleBeadID is one of the suppressed rows, so a reader can start from a
+	// concrete bead. Which row it is is not stable across builds: the repair
+	// sweep starts at a rotating offset.
+	SampleBeadID string
 }
 
 func (r DesiredStateResult) snapshotQueryPartial() bool {
@@ -770,7 +790,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	var unassignedRoutedBeads []beads.Bead
 	var unassignedRoutedStores []beads.Store
 	var unassignedRoutedStoreRefs []string
-	var unassignedRoutedPartial bool
+	var controlDispatcherScopeGaps []ControlDispatcherScopeGap
 	var readyUnassignedRoutedWorkBeads []beads.Bead
 	var readyUnassignedRoutedWorkStoreRefs []string
 	var readyAssigned map[storeScopedBeadKey]bool
@@ -800,14 +820,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
-		if len(assignedWorkBeads) > 0 {
-			fmt.Fprintf(stderr, "assignedWorkBeads: %d beads found\n", len(assignedWorkBeads)) //nolint:errcheck
-			for _, wb := range assignedWorkBeads {
-				fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata[beadmeta.RoutedToMetadataKey], wb.Status) //nolint:errcheck
-			}
-		} else {
-			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
-		}
+		logAssignedWorkBeads(stderr, assignedWorkBeads, len(rigStores))
 		// One-shot repair for beads a prior reconciler tick already clobbered
 		// (ga-3c5isi / #5193): restores gc.work_dir from the still-intact
 		// legacy work_dir when the canonical value was overwritten with a
@@ -840,6 +853,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// the route must be canonicalized before demand is counted or the cold
 		// pool never wakes for it.
 		subPhaseStart = time.Now()
+		var unassignedRoutedPartial bool
 		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
 		// Same repair as above, over the open/unassigned collection: a bead
 		// released back to open by a drain is clobbered the same way an
@@ -856,7 +870,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// demand is counted below, is what makes the row both countable and
 		// claimable in the same tick instead of neither.
 		collapseSlotSuffixedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
-		repairControlDispatcherRoutesForStoreScope(cityPath, cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr)
+		controlDispatcherScopeGaps = repairControlDispatcherRoutesForStoreScope(cityPath, cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr)
 		// canonicalizeLegacyBound* above rewrote gc.routed_to on open ready
 		// work, so the assigned-work snapshot is now stale for demand
 		// bucketing. Read the post-rewrite state from a fresh per-store
@@ -1202,10 +1216,6 @@ func buildDesiredStateWithSessionBeadsAt(
 		AssignedWorkStoreRefs:              assignedWorkStoreRefs,
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
-		OpenRoutedWorkBeads:                unassignedRoutedBeads,
-		OpenRoutedWorkStores:               unassignedRoutedStores,
-		OpenRoutedWorkStoreRefs:            unassignedRoutedStoreRefs,
-		OpenRoutedWorkQueryPartial:         unassignedRoutedPartial,
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
 		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
@@ -1216,6 +1226,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		SessionSnapshotComplete:            sessionSnapshotComplete,
 		SessionOccupancyInfos:              sessionOccupancyInfos,
 		BeaconTime:                         beaconTime,
+		ControlDispatcherScopeGaps:         controlDispatcherScopeGaps,
 	}
 }
 
@@ -1630,7 +1641,7 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, sessionBeads, skipReadyAssignees)
+	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -1747,7 +1758,7 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}) []string {
+func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -1775,12 +1786,38 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 		}
 	}
 	if cfg != nil {
+		cityName := config.EffectiveCityName(cfg, "")
+		hasOnDemand := false
+		for i := range cfg.NamedSessions {
+			if cfg.NamedSessions[i].Mode == "on_demand" {
+				hasOnDemand = true
+				break
+			}
+		}
+		// One batched read for every configured named session's closed-phantom
+		// lookup below, instead of the store.List-per-identity loop this
+		// replaced (ga-0t7qjl: 109 serial bd calls, +155s, on this city).
+		// Built only when an on_demand session actually exists to consult it —
+		// a city with zero (or only always-mode) named sessions must not pay
+		// this store read at all (ga-bequ8d).
+		var closedIdx session.ClosedNamedSessionBeadIndex
+		if hasOnDemand {
+			closedIdx = buildClosedNamedSessionBeadIndex(cityStore)
+		}
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
 				continue
 			}
 			identity := cfg.NamedSessions[i].QualifiedName()
 			add(identity)
+			// A closed phantom session bead for this identity means the
+			// on-demand session's own ready-assigned work is now filed under
+			// its runtime session name (#5231's assignee form), not the
+			// qualified identity above — enumerate that form too, or it is
+			// never queried and the work never re-materializes a session.
+			if _, ok := closedIdx.Find(identity); ok {
+				add(config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity))
+			}
 		}
 	}
 	return result
@@ -4883,6 +4920,22 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 	if err != nil {
 		return session.Info{}, err
 	}
+	// A retired bead can leave its runtime occupying the canonical singleton
+	// name. Do not mint a fresh bead on every demand tick while it remains.
+	// Existing-bead reuse happens before this create path; this is not adoption
+	// or permission to stop an unknown owner. Start still fences later races.
+	//
+	// The probe is deliberately outside the withLocks section below, which is
+	// why Start and not this probe is the authoritative fence. A provider
+	// liveness call blocks on I/O — the ACP provider dials the session control
+	// socket and pings it, each with its own sub-second timeout, per candidate
+	// path — while withLocks takes a cross-process city lock file per
+	// identifier spelling. Probing under those locks would stall every other
+	// creator of the same identifiers behind it. Do not close the
+	// probe-to-create window by widening the lock over this call.
+	if cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && bp.sp != nil && bp.sp.IsRunning(identifiers.sessionName) {
+		return session.Info{}, fmt.Errorf("%w: runtime %q still occupies singleton template %q", errPoolSessionNameUnavailable, identifiers.sessionName, template)
+	}
 	if bp.beadStore == nil {
 		return createPoolSessionBeadWithIdentifiers(bp.beadStore, template, bp.city, bp.sessionBeads, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, identifiers)
 	}
@@ -4947,23 +5000,28 @@ func isFailedCreateSessionInfo(i session.Info) bool {
 }
 
 // sessionBeadHasAssignedWorkInfo reports whether any open/in-progress work bead is
-// assigned to the session: the SESSION side reads typed Info fields (ID,
-// SessionNameMetadata, ConfiguredNamedIdentity) while the WORK bead slice stays raw
-// (ClassWork — Bead is the domain object). It is the production reuse predicate the
-// pool selection path calls; its behavior is pinned by TestSessionBeadHasAssignedWorkInfo
-// (WI-7 W-delete retired the raw sessionBeadHasAssignedWork equivalence reference along
-// with the rest of the raw pool cluster and re-pointed the pin to a golden).
-func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
+// assigned to the session: the SESSION side reads typed Info fields through
+// sessionAssignmentIdentifiersForConfigInfo (ID, SessionNameMetadata,
+// ConfiguredNamedIdentity, the stable alias, and the configured named-session
+// fallback) while the WORK bead slice stays raw (ClassWork — Bead is the domain
+// object). It is the production reuse predicate the pool selection path calls, so
+// it must recognize the same identities as the drain guards and the awake set: a
+// namepool member claims under its alias, and missing that claim lets pool
+// selection reuse a seat that is still working. Its behavior is pinned by
+// TestSessionBeadHasAssignedWorkInfo (WI-7 W-delete retired the raw
+// sessionBeadHasAssignedWork equivalence reference along with the rest of the raw
+// pool cluster and re-pointed the pin to a golden).
+func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info, cfg *config.City) bool {
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)
 		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
 			continue
 		}
-		if assignee == info.ID || assignee == strings.TrimSpace(info.SessionNameMetadata) {
-			return true
-		}
-		if namedIdentity := strings.TrimSpace(info.ConfiguredNamedIdentity); namedIdentity != "" && assignee == namedIdentity {
-			return true
+		for _, identifier := range identifiers {
+			if assignee == identifier {
+				return true
+			}
 		}
 	}
 	return false
@@ -4973,11 +5031,11 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 // sessionBeadHasAssignedWorkInfo: it matches an open/in-progress work bead's
 // Assignee against every current identity of the session (ID,
 // SessionNameMetadata, ConfiguredNamedIdentity, Alias, AliasHistory — see
-// session.AssigneeIdentities), not just the narrower ID/SessionNameMetadata/
-// ConfiguredNamedIdentity trio sessionBeadHasAssignedWorkInfo pins. Work
-// claimed by an agent is commonly assigned under its actor alias (GC_ALIAS /
-// BEADS_ACTOR, see session.AssigneeIdentifier), which the narrower check
-// does not consider, so it can miss live assigned work entirely.
+// session.AssigneeIdentities), not just the current-identity set
+// sessionBeadHasAssignedWorkInfo matches. The narrower check honors a stable
+// alias but deliberately ignores a rebinding pool-slot alias and every prior
+// alias in alias_history, so it can miss work a one_shot exit left assigned
+// under one of those forms.
 //
 // It exists as a separate function (not a change to the pinned
 // sessionBeadHasAssignedWorkInfo) so its wider match is opt-in for callers
@@ -5991,6 +6049,10 @@ func controlDispatcherRouteRepairCursorForDomain(repairDomain string) *atomic.Ui
 // scopes. Deferred or failed cross-scope route repairs are suppressed from this
 // tick's demand snapshot and retried on later ticks; marker-only cleanup leaves
 // an already-canonical route eligible for demand.
+//
+// It returns one summary per scope whose control-dispatcher is missing entirely
+// — a config gap the repair cannot fix, only report — so the caller can emit a
+// counted event alongside the per-scope stderr line.
 func repairControlDispatcherRoutesForStoreScope(
 	repairDomain string,
 	cfg *config.City,
@@ -5998,16 +6060,20 @@ func repairControlDispatcherRoutesForStoreScope(
 	workStores []beads.Store,
 	workStoreRefs []string,
 	stderr io.Writer,
-) {
+) []ControlDispatcherScopeGap {
 	if cfg == nil || len(workBeads) == 0 {
-		return
+		return nil
 	}
 	if len(workBeads) != len(workStores) || len(workBeads) != len(workStoreRefs) {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "repairControlDispatcherRoutesForStoreScope: index-aligned input mismatch beads=%d stores=%d refs=%d\n", len(workBeads), len(workStores), len(workStoreRefs)) //nolint:errcheck
 		}
 		suppressControlDispatcherRoutes(workBeads)
-		return
+		// A misaligned input suppresses every control route without evaluating a
+		// single scope, so it proves nothing about which scopes lack a
+		// dispatcher. The diagnostic above already covers it; reporting the
+		// blanket suppression as a scope gap would fabricate a config finding.
+		return nil
 	}
 	repair := newControlDispatcherRouteRepair(cfg, stderr)
 	cursor := controlDispatcherRouteRepairCursorForDomain(repairDomain)
@@ -6016,6 +6082,7 @@ func repairControlDispatcherRoutesForStoreScope(
 		i := (start + offset) % len(workBeads)
 		repair.repairBead(&workBeads[i], workStores[i], workStoreRefs[i])
 	}
+	return repair.scopeGaps
 }
 
 // controlDispatcherRouteLookup memoizes whether a scope (the city, or one rig)
@@ -6027,25 +6094,53 @@ type controlDispatcherRouteLookup struct {
 
 // controlDispatcherRouteRepair carries the per-pass state for a bounded
 // cross-scope control-route repair sweep: per-scope route lookups are cached, a
-// scope with no configured dispatcher is reported once, and the remaining
-// durable-write budget is tracked so a large upgrade backlog cannot monopolize a
-// reconciler tick.
+// scope with no configured dispatcher is reported once and its suppressed rows
+// counted, and the remaining durable-write budget is tracked so a large upgrade
+// backlog cannot monopolize a reconciler tick.
 type controlDispatcherRouteRepair struct {
-	cfg                  *config.City
-	routeByScope         map[string]controlDispatcherRouteLookup
-	reportedMissingScope map[string]bool
-	writesRemaining      int
-	stderr               io.Writer
+	cfg          *config.City
+	routeByScope map[string]controlDispatcherRouteLookup
+	// scopeGaps holds one entry per scope with no configured dispatcher, in
+	// first-sighting order; gapIndexByScope finds an existing entry to count
+	// into. A slice rather than a map so the pass emits its gaps deterministically.
+	scopeGaps       []ControlDispatcherScopeGap
+	gapIndexByScope map[string]int
+	writesRemaining int
+	stderr          io.Writer
 }
 
 func newControlDispatcherRouteRepair(cfg *config.City, stderr io.Writer) *controlDispatcherRouteRepair {
 	return &controlDispatcherRouteRepair{
-		cfg:                  cfg,
-		routeByScope:         make(map[string]controlDispatcherRouteLookup),
-		reportedMissingScope: make(map[string]bool),
-		writesRemaining:      controlDispatcherRouteRepairLimitPerTick,
-		stderr:               stderr,
+		cfg:             cfg,
+		routeByScope:    make(map[string]controlDispatcherRouteLookup),
+		gapIndexByScope: make(map[string]int),
+		writesRemaining: controlDispatcherRouteRepairLimitPerTick,
+		stderr:          stderr,
 	}
+}
+
+// recordScopeGap counts one control row suppressed for a scope with no
+// configured dispatcher, and reports the scope on stderr the first time it is
+// seen. The label, leg and sample bead are fixed at first sighting: the sweep
+// starts at a rotating offset, so "first" is not stable across ticks, but the
+// count is.
+func (r *controlDispatcherRouteRepair) recordScopeGap(bead *beads.Bead, storeRef, rigContext string) {
+	if idx, ok := r.gapIndexByScope[rigContext]; ok {
+		r.scopeGaps[idx].SuppressedCount++
+		return
+	}
+	label := controlDispatcherRowScopeLabel(storeRef, rigContext)
+	if r.stderr != nil {
+		fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s in %s has no configured control-dispatcher for its scope\n", bead.ID, label) //nolint:errcheck
+	}
+	r.gapIndexByScope[rigContext] = len(r.scopeGaps)
+	r.scopeGaps = append(r.scopeGaps, ControlDispatcherScopeGap{
+		ScopeLabel:      label,
+		RigContext:      rigContext,
+		StoreRef:        strings.TrimSpace(storeRef),
+		SuppressedCount: 1,
+		SampleBeadID:    bead.ID,
+	})
 }
 
 // repairBead realigns one control bead's persisted route with the dispatcher
@@ -6085,11 +6180,12 @@ func (r *controlDispatcherRouteRepair) repairBead(bead *beads.Bead, store beads.
 // desiredRoute returns the configured control-dispatcher route for the scope
 // that owns the bead — "" for the city, else the rig its gc.root_store_ref
 // names — caching lookups per rig context. When no dispatcher is configured it
-// reports the gap once per scope and suppresses the bead's cross-scope route
-// from this tick's demand snapshot so it cannot create phantom demand for a
-// dispatcher that cannot read the store; the durable route is left in place for
-// operator diagnosis and a later config repair. storeRef is the leg the row was
-// collected through and is used only to name it in that diagnostic.
+// reports the gap once per scope, counts the row into that scope's summary, and
+// suppresses the bead's cross-scope route from this tick's demand snapshot so
+// it cannot create phantom demand for a dispatcher that cannot read the store;
+// the durable route is left in place for operator diagnosis and a later config
+// repair. storeRef is the leg the row was collected through and is used only to
+// name it in that diagnostic.
 func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef, rigContext string) (string, bool) {
 	lookup, cached := r.routeByScope[rigContext]
 	if !cached {
@@ -6099,12 +6195,7 @@ func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef, 
 	if lookup.ok {
 		return lookup.route, true
 	}
-	if !r.reportedMissingScope[rigContext] {
-		if r.stderr != nil {
-			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s in %s has no configured control-dispatcher for its scope\n", bead.ID, controlDispatcherRowScopeLabel(storeRef, rigContext)) //nolint:errcheck
-		}
-		r.reportedMissingScope[rigContext] = true
-	}
+	r.recordScopeGap(bead, storeRef, rigContext)
 	delete(bead.Metadata, beadmeta.RoutedToMetadataKey)
 	return "", false
 }
