@@ -2230,9 +2230,9 @@ func startPreparedStartCandidate(
 			// of on a normal reconcile tick — so it is recorded the same way
 			// (gc.agent.crashes.total), not as a stop: nothing here was
 			// deliberately shut down, gc is discovering and clearing wreckage
-			// left by the agent process's own exit.
-			crashOutput, _ := sp.Peek(name, rateLimitPeekLines)
-			telemetry.RecordAgentCrash(context.Background(), item.candidate.tp.DisplayName(), crashOutput)
+			// left by the agent process's own exit. Like that detector, a
+			// provider rate-limit screen in the pane is not counted as a crash.
+			crashOutput, peekErr := sp.Peek(name, rateLimitPeekLines)
 			recycleBegin := time.Now()
 			stopErr := sp.Stop(name)
 			if phases != nil {
@@ -2240,6 +2240,11 @@ func startPreparedStartCandidate(
 			}
 			if stopErr != nil && !runtime.IsSessionGone(stopErr) {
 				return false, fmt.Errorf("recycling session %q with dead agent process: %w", name, stopErr)
+			}
+			// Recording after a successful Stop bounds this to one datapoint
+			// per recycle even when a failed Stop sends the start back for retry.
+			if peekErr == nil && !runtime.ContainsProviderRateLimitScreen(crashOutput) {
+				telemetry.RecordAgentCrash(context.Background(), item.candidate.tp.DisplayName(), crashOutput)
 			}
 		}
 	}

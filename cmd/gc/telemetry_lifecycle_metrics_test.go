@@ -345,6 +345,69 @@ func TestExecutePreparedStartWave_RecyclesZombieSession_RecordsCrashMetric(t *te
 	}
 }
 
+// TestExecutePreparedStartWave_RecyclesZombieSession_SkipsCrashMetric pins the
+// two zombie-recycle shapes that must not increment gc.agent.crashes.total: a
+// pane showing a provider rate-limit screen (mirrors the steady-state zombie
+// detector's exclusion), and a recycle whose Stop fails (the start retries,
+// so recording before the Stop would count the same zombie once per retry).
+func TestExecutePreparedStartWave_RecyclesZombieSession_SkipsCrashMetric(t *testing.T) {
+	newZombie := func(t *testing.T) (*runtime.Fake, preparedStart) {
+		t.Helper()
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
+			t.Fatalf("Start existing session: %v", err)
+		}
+		sp.Zombies["test-agent"] = true
+		return sp, preparedStart{
+			candidate: startCandidate{
+				info: sessionpkg.Info{
+					ID:                  "gc-102",
+					SessionName:         "test-agent",
+					SessionNameMetadata: "test-agent",
+					Template:            "worker",
+				},
+				tp: TemplateParams{
+					Command:      "claude",
+					SessionName:  "test-agent",
+					TemplateName: "worker",
+				},
+			},
+			cfg: runtime.Config{
+				Command:      "claude",
+				ProcessNames: []string{"claude"},
+			},
+		}
+	}
+
+	t.Run("rate-limit screen is not a crash", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		sp, item := newZombie(t)
+		sp.SetPeekOutput("test-agent", "You've hit your limit, Pro plan\n\n/rate-limit-options")
+
+		results := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+		if len(results) != 1 || results[0].err != nil {
+			t.Fatalf("expected 1 successful result (zombie recycle must not wedge the start), got %+v", results)
+		}
+		if points := collectCounterDataPoints(t, reader, "gc.agent.crashes.total"); len(points) != 0 {
+			t.Fatalf("gc.agent.crashes.total datapoints = %+v, want none for a rate-limit screen", points)
+		}
+	})
+
+	t.Run("failed stop records no crash", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		sp, item := newZombie(t)
+		sp.StopErrors["test-agent"] = errors.New("stop failed")
+
+		results := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+		if len(results) != 1 || results[0].err == nil {
+			t.Fatalf("expected 1 failed result when the zombie recycle Stop fails, got %+v", results)
+		}
+		if points := collectCounterDataPoints(t, reader, "gc.agent.crashes.total"); len(points) != 0 {
+			t.Fatalf("gc.agent.crashes.total datapoints = %+v, want none when the recycle Stop fails", points)
+		}
+	})
+}
+
 // TestStopStaleAsyncStartRuntime_RecordsAgentStopMetric verifies that killing
 // a runtime session left over from a superseded async start (a different
 // session generation/instance_token now owns the pending create) increments
