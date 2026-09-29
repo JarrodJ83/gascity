@@ -247,6 +247,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forwarded `GC_`-prefixed keys into sessions, so a variable could be fully
   persisted into the supervisor's own process and still never reach an agent.
   One opt-in list now governs both, so declaring a variable once is enough.
+  Behavior change: variables already listed in `GC_SUPERVISOR_ENV` will now
+  also be forwarded into agent sessions.
 
 - **The reaper's stale-issue auto-close works again when an open bead
   depends on a wisp or external bead.** Such a dependency has no

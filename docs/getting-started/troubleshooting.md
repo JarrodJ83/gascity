@@ -465,11 +465,14 @@ supervisor daemon itself runs with, then restart it so the daemon process
 picks up both the opt-in list and the variable's value:
 
 ```bash
-export GC_SUPERVISOR_ENV=MY_CUSTOM_VAR      # add to any existing list, comma or space separated
+export GC_SUPERVISOR_ENV=GC_SUPERVISOR_ENV,MY_CUSTOM_VAR   # the list names itself so it survives restarts; comma or space separated
 export MY_CUSTOM_VAR=/path/to/thing
 gc supervisor install   # regenerates the service file with both persisted
-gc service restart      # restarts the supervisor so it inherits them
+gc supervisor stop && gc supervisor start   # restart the supervisor so it inherits them
 ```
+
+Sessions that are already running keep their old environment; restart them to
+receive a newly forwarded variable.
 
 `GC_SUPERVISOR_ENV` itself needs to be present in the supervisor daemon's own
 environment for this to survive a later restart — it is not automatically
