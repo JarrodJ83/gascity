@@ -53,6 +53,7 @@ func newUsageFactHandle(t *testing.T) (handle *SessionHandle, transcriptPath, si
 	manager := sessionpkg.NewManagerWithOptions(store, sp)
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
+		Store:       store,
 		SearchPaths: []string{searchBase},
 		UsageSink:   usage.NewLocalSink(sinkPath),
 		Session: SessionSpec{
@@ -153,9 +154,12 @@ func TestMessageEmitsModelUsageFactToSink(t *testing.T) {
 }
 
 // TestMessageEmitsModelUsageFactWithFormulaName verifies the prompt-op seam
-// end-to-end: when the session bead carries gc.formula_name metadata the emitted
-// usage.Fact must carry the same FormulaName. This covers the metadata-read in
-// recordInvocationTelemetry that was wired in gc-caf.
+// end-to-end: the formula compiler stamps gc.formula_name on the molecule ROOT
+// bead, and the session bead carries molecule_id pointing to that root (stamped
+// by the reconciler when assigning formula work). recordInvocationTelemetry must
+// follow that run chain — session bead → molecule_id → root bead → gc.formula_name
+// — rather than reading gc.formula_name from the session bead directly (which
+// nothing writes in production).
 func TestMessageEmitsModelUsageFactWithFormulaName(t *testing.T) {
 	searchBase := t.TempDir()
 	workDir := t.TempDir()
@@ -166,6 +170,7 @@ func TestMessageEmitsModelUsageFactWithFormulaName(t *testing.T) {
 	manager := sessionpkg.NewManagerWithOptions(store, sp)
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
+		Store:       store,
 		SearchPaths: []string{searchBase},
 		UsageSink:   usage.NewLocalSink(sinkPath),
 		Session: SessionSpec{
@@ -185,9 +190,20 @@ func TestMessageEmitsModelUsageFactWithFormulaName(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
+	// Simulate the sling+compiler setup: the molecule root bead carries
+	// gc.formula_name (stamped by the formula compiler), and the session bead's
+	// molecule_id points to it (stamped by the reconciler when assigning work).
+	// Nothing writes gc.formula_name directly onto the session bead in production.
 	const formulaName = "code-review"
-	if err := store.SetMetadata(h.sessionID, beadmeta.FormulaNameMetadataKey, formulaName); err != nil {
-		t.Fatalf("SetMetadata gc.formula_name: %v", err)
+	rootBead, err := store.Create(beads.Bead{Title: "mol-code-review"})
+	if err != nil {
+		t.Fatalf("Create root bead: %v", err)
+	}
+	if err := store.SetMetadata(rootBead.ID, beadmeta.FormulaNameMetadataKey, formulaName); err != nil {
+		t.Fatalf("SetMetadata gc.formula_name on root: %v", err)
+	}
+	if err := store.SetMetadata(h.sessionID, "molecule_id", rootBead.ID); err != nil {
+		t.Fatalf("SetMetadata molecule_id on session: %v", err)
 	}
 
 	info, err := manager.Get(h.sessionID)
@@ -215,7 +231,7 @@ func TestMessageEmitsModelUsageFactWithFormulaName(t *testing.T) {
 		t.Fatalf("want 1 model fact, got %d: %+v", len(facts), facts)
 	}
 	if facts[0].FormulaName != formulaName {
-		t.Errorf("FormulaName = %q, want %q (from gc.formula_name bead metadata)", facts[0].FormulaName, formulaName)
+		t.Errorf("FormulaName = %q, want %q (resolved from molecule root bead via molecule_id run chain)", facts[0].FormulaName, formulaName)
 	}
 }
 
@@ -547,9 +563,11 @@ func TestFactorySweepSessionModelUsageClaude(t *testing.T) {
 }
 
 // TestSweepSessionModelUsageCarriesFormulaName verifies the sweep-seam end-to-end:
-// when the session bead carries gc.formula_name metadata, every emitted usage.Fact
-// must carry the same FormulaName. This covers the metadata-read in
-// sweepResolvedTranscript that was wired in gc-caf.
+// the formula compiler stamps gc.formula_name on the molecule ROOT bead; the session
+// bead's molecule_id points to that root (stamped by the reconciler). sweepResolvedTranscript
+// must follow the run chain — molecule_id → root bead → gc.formula_name — not read
+// gc.formula_name directly from the session bead's metadata (nothing writes it there
+// in production).
 func TestSweepSessionModelUsageCarriesFormulaName(t *testing.T) {
 	searchBase := t.TempDir()
 	workDir := t.TempDir()
@@ -584,9 +602,19 @@ func TestSweepSessionModelUsageCarriesFormulaName(t *testing.T) {
 	}
 	id := h.sessionID
 
+	// Simulate the sling+compiler setup: the molecule root bead carries
+	// gc.formula_name, and the session bead's molecule_id points to it.
+	// Nothing writes gc.formula_name directly onto the session bead in production.
 	const formulaName = "my-sweep-formula"
-	if err := store.SetMetadata(id, beadmeta.FormulaNameMetadataKey, formulaName); err != nil {
-		t.Fatalf("SetMetadata gc.formula_name: %v", err)
+	rootBead, err := store.Create(beads.Bead{Title: "mol-my-sweep-formula"})
+	if err != nil {
+		t.Fatalf("Create root bead: %v", err)
+	}
+	if err := store.SetMetadata(rootBead.ID, beadmeta.FormulaNameMetadataKey, formulaName); err != nil {
+		t.Fatalf("SetMetadata gc.formula_name on root: %v", err)
+	}
+	if err := store.SetMetadata(id, "molecule_id", rootBead.ID); err != nil {
+		t.Fatalf("SetMetadata molecule_id on session: %v", err)
 	}
 
 	info, err := h.manager.Get(id)
@@ -624,7 +652,7 @@ func TestSweepSessionModelUsageCarriesFormulaName(t *testing.T) {
 		t.Fatalf("want 1 model fact, got %d: %+v", len(facts), facts)
 	}
 	if facts[0].FormulaName != formulaName {
-		t.Errorf("FormulaName = %q, want %q (from gc.formula_name bead metadata)", facts[0].FormulaName, formulaName)
+		t.Errorf("FormulaName = %q, want %q (resolved from molecule root bead via molecule_id run chain)", facts[0].FormulaName, formulaName)
 	}
 }
 

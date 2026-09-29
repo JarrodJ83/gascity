@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/pricing"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -181,7 +182,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if agentName == "" {
 		agentName = strings.TrimSpace(info.SessionName)
 	}
-	formulaName := strings.TrimSpace(pr.Metadata[beadmeta.FormulaNameMetadataKey])
+	formulaName := resolveFormulaName(h.store, pr.Metadata, id)
 	// Model usage facts flow to the configured usage sink (gc costs / external
 	// aggregators), independent of the metrics above and of operation-event
 	// recording: a sink-only handle (CLI factory path) still emits. Resolved once
@@ -388,6 +389,34 @@ func discoverCodexInvocationTranscript(h *SessionHandle, _ string, createdAt tim
 		anchor,
 		codexInvocationDiscoveryWindow,
 	)
+}
+
+// resolveFormulaName returns the gc.formula_name for the session identified by
+// meta, following the run chain stamped by the formula compiler. The formula
+// compiler stamps gc.formula_name on the molecule ROOT bead, not on the
+// session bead, so reading it directly from meta always yields "" in
+// production. Instead we resolve the RunID from meta (via the shared
+// ResolveRunID chain: workflow_id || molecule_id || gc.root_bead_id), then
+// fetch that root bead from the store and read its gc.formula_name.
+//
+// When the session bead has no run-chain key (a plain chat or a session not
+// yet assigned formula work), RunID collapses to the session bead ID itself.
+// In that case there is no formula to look up, so we fall back to whatever
+// gc.formula_name is already in meta — empty in production, but preserved for
+// tests that stamp the key directly on the session bead.
+//
+// store may be nil; in that case the root-bead lookup is skipped and the
+// fallback path runs unconditionally.
+func resolveFormulaName(store beads.Store, meta map[string]string, sessionID string) string {
+	runID := beadmeta.ResolveRunID(meta, sessionID, sessionID)
+	if runID == sessionID || store == nil {
+		return strings.TrimSpace(meta[beadmeta.FormulaNameMetadataKey])
+	}
+	root, err := store.Get(runID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey])
 }
 
 // usageIdentity returns the dedup identity of one invocation: the provider
@@ -682,7 +711,7 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 	}
 	workerName := strings.TrimSpace(meta["session_name"])
 	agentName := sweepAgentName(meta)
-	formulaName := strings.TrimSpace(meta[beadmeta.FormulaNameMetadataKey])
+	formulaName := resolveFormulaName(f.store, meta, id)
 	lastRecorded := ""
 	for _, u := range pending {
 		cost, priced := registry.Estimate(family, u.Model, pricing.Usage{
