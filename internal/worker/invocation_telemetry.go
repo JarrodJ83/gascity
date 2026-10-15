@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -182,7 +184,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if agentName == "" {
 		agentName = strings.TrimSpace(info.SessionName)
 	}
-	formulaName := resolveFormulaName(h.store, pr.Metadata, id)
+	formulaName := resolveFormulaName(h.resolveBead, h.formulaMemo, pr.Metadata, id)
 	// Model usage facts flow to the configured usage sink (gc costs / external
 	// aggregators), independent of the metrics above and of operation-event
 	// recording: a sink-only handle (CLI factory path) still emits. Resolved once
@@ -390,32 +392,73 @@ func discoverCodexInvocationTranscript(h *SessionHandle, _ string, createdAt tim
 	)
 }
 
-// resolveFormulaName returns the gc.formula_name for the session identified by
-// meta, following the run chain stamped by the formula compiler. The formula
-// compiler stamps gc.formula_name on the molecule ROOT bead, not on the
-// session bead, so reading it directly from meta always yields "" in
-// production. Instead we resolve the RunID from meta (via the shared
-// ResolveRunID chain: workflow_id || molecule_id || gc.root_bead_id), then
-// fetch that root bead from the store and read its gc.formula_name.
-//
-// When the session bead has no run-chain key (a plain chat or a session not
-// yet assigned formula work), RunID collapses to the session bead ID itself.
-// In that case there is no formula to look up, so we fall back to whatever
-// gc.formula_name is already in meta — empty in production, but preserved for
-// tests that stamp the key directly on the session bead.
-//
-// store may be nil; in that case the root-bead lookup is skipped and the
-// fallback path runs unconditionally.
-func resolveFormulaName(store beads.Store, meta map[string]string, sessionID string) string {
-	runID := beadmeta.ResolveRunID(meta, sessionID, sessionID)
-	if runID == sessionID || store == nil {
-		return strings.TrimSpace(meta[beadmeta.FormulaNameMetadataKey])
+// actingBeadID returns the work bead the controller says the session is on:
+// the processing pointer (session.CurrentBeadIDKey), else the pool trigger
+// (gc.trigger_bead_id). Processing wins and there is no liveness check: the
+// terminal sweep recovers usage after the work closed and the pointer still
+// names it. The claim pointer is deliberately never read.
+func actingBeadID(meta map[string]string) string {
+	if id := strings.TrimSpace(meta[sessionpkg.CurrentBeadIDKey]); id != "" {
+		return id
 	}
-	root, err := store.Get(runID)
-	if err != nil {
+	return strings.TrimSpace(meta[beadmeta.TriggerBeadIDMetadataKey])
+}
+
+// resolveFormulaName returns the formula the session's acting bead belongs to:
+// the gc.formula_name stamped on the acting bead's run root, empty when the
+// session has no acting bead, the bead or its root is gone, or the root was
+// not compiled from a formula. The session bead is never consulted: the
+// compiler stamps the name on the run root, and the session bead carries no
+// run chain of its own.
+//
+// It runs once per non-empty batch of invocations, after the empty-batch
+// returns, so a tick that has nothing to record pays no read. The walk costs at
+// most two reads (the acting bead, then its root when that differs) and the
+// memo makes a warm lookup free. beads.ErrNotFound is the normal miss (a
+// purged or burned wisp) and is remembered; any other error leaves the label
+// empty, warns once for the batch, and is not remembered, so the fact is still
+// emitted whole.
+func resolveFormulaName(resolve func(id string) (beads.Bead, error), memo *FormulaNameMemo, meta map[string]string, sessionID string) string {
+	actingID := actingBeadID(meta)
+	if actingID == "" || resolve == nil {
 		return ""
 	}
-	return strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey])
+	name, err := memo.resolve(actingID, func() (string, error) {
+		return formulaOfActingBead(resolve, actingID)
+	})
+	if err != nil {
+		slog.Warn("usage attribution: formula lookup failed; recording the fact without a formula name",
+			slog.String("session_id", sessionID), slog.String("acting_bead_id", actingID), slog.Any("error", err))
+		return ""
+	}
+	return name
+}
+
+// formulaOfActingBead walks acting bead -> run root and returns the root's
+// trimmed gc.formula_name. A bead that is its own root carries its own stamp.
+func formulaOfActingBead(resolve func(id string) (beads.Bead, error), actingID string) (string, error) {
+	acting, err := resolve(actingID)
+	if errors.Is(err, beads.ErrNotFound) {
+		slog.Debug("usage attribution: acting bead not found", slog.String("acting_bead_id", actingID))
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading acting bead: %w", err)
+	}
+	rootID := beadmeta.ResolveRunID(acting.Metadata, acting.ID, "")
+	if rootID == acting.ID {
+		return strings.TrimSpace(acting.Metadata[beadmeta.FormulaNameMetadataKey]), nil
+	}
+	root, err := resolve(rootID)
+	if errors.Is(err, beads.ErrNotFound) {
+		slog.Debug("usage attribution: run root not found",
+			slog.String("acting_bead_id", actingID), slog.String("root_bead_id", rootID))
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading run root %q: %w", rootID, err)
+	}
+	return strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]), nil
 }
 
 // usageIdentity returns the dedup identity of one invocation: the provider
@@ -710,7 +753,7 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 	}
 	workerName := strings.TrimSpace(meta["session_name"])
 	agentName := sweepAgentName(meta)
-	formulaName := resolveFormulaName(f.store, meta, id)
+	formulaName := resolveFormulaName(f.resolveBead, f.formulaMemo, meta, id)
 	lastRecorded := ""
 	for _, u := range pending {
 		cost, priced := registry.Estimate(family, u.Model, pricing.Usage{

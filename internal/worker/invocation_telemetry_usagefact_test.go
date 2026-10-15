@@ -52,7 +52,6 @@ func newUsageFactHandle(t *testing.T) (handle *SessionHandle, transcriptPath, si
 	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
-		Store:       store,
 		SearchPaths: []string{searchBase},
 		UsageSink:   usage.NewLocalSink(sinkPath),
 		Session: SessionSpec{

@@ -26,8 +26,13 @@ gc costs shows nothing local.
 
 Cost is a list-price estimate for decision support, not an authoritative
 charge; invocations with no pricing are flagged "unpriced" and excluded from
-the cost total.`,
-		Example: "  gc costs",
+the cost total.
+
+With --by-formula, model usage is grouped by the formula the acting bead's run
+was compiled from instead of by run; usage with no formula appears as "-".
+Compute wall-seconds are not attributed to a formula, so that table has no
+WALL_S column.`,
+		Example: "  gc costs\n  gc costs --by-formula",
 		Args:    cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doCosts(stdout, stderr, byFormula) != 0 {
@@ -36,13 +41,12 @@ the cost total.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&byFormula, "by-formula", false, "group all runs of the same formula into one aggregated row")
+	cmd.Flags().BoolVar(&byFormula, "by-formula", false, "group model usage by the formula each fact is attributed to instead of by run")
 	return cmd
 }
 
 type runCost struct {
 	RunID               string  `json:"run_id"`
-	FormulaName         string  `json:"formula_name,omitempty"`
 	Invocations         int     `json:"invocations"`
 	ComputeFacts        int     `json:"compute_facts"`
 	InputTokens         int     `json:"input_tokens"`
@@ -65,21 +69,9 @@ func aggregateRunCosts(facts []usage.Fact) []runCost {
 			byRun[f.RunID] = rc
 			order = append(order, f.RunID)
 		}
-		if rc.FormulaName == "" && f.FormulaName != "" {
-			rc.FormulaName = f.FormulaName
-		}
 		switch f.Kind {
 		case usage.KindModel:
-			rc.Invocations++
-			rc.InputTokens += f.InputTokens
-			rc.OutputTokens += f.OutputTokens
-			rc.CacheReadTokens += f.CacheReadTokens
-			rc.CacheCreationTokens += f.CacheCreationTokens
-			if f.Unpriced {
-				rc.Unpriced++
-			} else {
-				rc.CostUSDEstimate += f.CostUSDEstimate
-			}
+			addModelFact(&rc.Invocations, &rc.InputTokens, &rc.OutputTokens, &rc.CacheReadTokens, &rc.CacheCreationTokens, &rc.CostUSDEstimate, &rc.Unpriced, f)
 		case usage.KindCompute:
 			rc.ComputeFacts++
 			rc.WallSeconds += f.WallSeconds
@@ -93,38 +85,55 @@ func aggregateRunCosts(facts []usage.Fact) []runCost {
 	return rows
 }
 
-// aggregateByFormula groups run costs by formula name into one aggregated row
-// per formula. Runs with no formula name are grouped under "-".
-func aggregateByFormula(rows []runCost) []runCost {
-	byFormula := map[string]*runCost{}
-	var order []string
-	for _, r := range rows {
-		key := r.FormulaName
-		if key == "" {
-			key = "-"
+// addModelFact folds one model fact into a row's counters. Both tables use it,
+// so the per-formula buckets conserve the default table's model columns.
+func addModelFact(invocations, in, out, cacheRead, cacheCreate *int, cost *float64, unpriced *int, f usage.Fact) {
+	*invocations++
+	*in += f.InputTokens
+	*out += f.OutputTokens
+	*cacheRead += f.CacheReadTokens
+	*cacheCreate += f.CacheCreationTokens
+	if f.Unpriced {
+		*unpriced++
+	} else {
+		*cost += f.CostUSDEstimate
+	}
+}
+
+// formulaCost is one row of the --by-formula table: the model facts that carry
+// one formula name. The empty name is the unattributed bucket.
+type formulaCost struct {
+	FormulaName         string
+	Invocations         int
+	InputTokens         int
+	OutputTokens        int
+	CacheReadTokens     int
+	CacheCreationTokens int
+	CostUSDEstimate     float64
+	Unpriced            int
+}
+
+// aggregateFormulaCosts buckets model facts by their own formula name, sorted
+// by name. Compute facts carry no formula and are not counted.
+func aggregateFormulaCosts(facts []usage.Fact) []formulaCost {
+	byName := map[string]*formulaCost{}
+	for _, f := range facts {
+		if f.Kind != usage.KindModel {
+			continue
 		}
-		fc := byFormula[key]
+		fc := byName[f.FormulaName]
 		if fc == nil {
-			fc = &runCost{FormulaName: key}
-			byFormula[key] = fc
-			order = append(order, key)
+			fc = &formulaCost{FormulaName: f.FormulaName}
+			byName[f.FormulaName] = fc
 		}
-		fc.Invocations += r.Invocations
-		fc.ComputeFacts += r.ComputeFacts
-		fc.InputTokens += r.InputTokens
-		fc.OutputTokens += r.OutputTokens
-		fc.CacheReadTokens += r.CacheReadTokens
-		fc.CacheCreationTokens += r.CacheCreationTokens
-		fc.WallSeconds += r.WallSeconds
-		fc.CostUSDEstimate += r.CostUSDEstimate
-		fc.Unpriced += r.Unpriced
+		addModelFact(&fc.Invocations, &fc.InputTokens, &fc.OutputTokens, &fc.CacheReadTokens, &fc.CacheCreationTokens, &fc.CostUSDEstimate, &fc.Unpriced, f)
 	}
-	sort.Strings(order)
-	result := make([]runCost, 0, len(order))
-	for _, key := range order {
-		result = append(result, *byFormula[key])
+	rows := make([]formulaCost, 0, len(byName))
+	for _, fc := range byName {
+		rows = append(rows, *fc)
 	}
-	return result
+	sort.Slice(rows, func(i, j int) bool { return rows[i].FormulaName < rows[j].FormulaName })
+	return rows
 }
 
 func doCosts(stdout, stderr io.Writer, byFormula bool) int {
@@ -150,34 +159,21 @@ func doCosts(stdout, stderr io.Writer, byFormula bool) int {
 // renderCosts writes the costs table for facts to stdout. usagePath only names
 // the log in the empty-result message.
 func renderCosts(stdout io.Writer, facts []usage.Fact, byFormula bool, usagePath string) int {
-	rows := aggregateRunCosts(facts)
 	if byFormula {
-		rows = aggregateByFormula(rows)
+		return renderFormulaCosts(stdout, facts)
 	}
+	rows := aggregateRunCosts(facts)
 
 	if len(rows) == 0 {
 		fmt.Fprintf(stdout, "No usage facts recorded yet (%s).\n", usagePath) //nolint:errcheck
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-	if byFormula {
-		fmt.Fprintln(tw, "FORMULA\tINVOCATIONS\tIN\tOUT\tCACHE_R\tCACHE_C\tWALL_S\tEST_USD\tUNPRICED") //nolint:errcheck
-	} else {
-		fmt.Fprintln(tw, "RUN\tFORMULA\tINVOCATIONS\tIN\tOUT\tCACHE_R\tCACHE_C\tWALL_S\tEST_USD\tUNPRICED") //nolint:errcheck
-	}
+	fmt.Fprintln(tw, "RUN\tINVOCATIONS\tIN\tOUT\tCACHE_R\tCACHE_C\tWALL_S\tEST_USD\tUNPRICED") //nolint:errcheck
 	var tot runCost
 	for _, r := range rows {
-		formula := r.FormulaName
-		if formula == "" {
-			formula = "-"
-		}
-		if byFormula {
-			fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
-				formula, r.Invocations, r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.WallSeconds, r.CostUSDEstimate, r.Unpriced)
-		} else {
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
-				truncRunID(r.RunID), formula, r.Invocations, r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.WallSeconds, r.CostUSDEstimate, r.Unpriced)
-		}
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
+			truncRunID(r.RunID), r.Invocations, r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.WallSeconds, r.CostUSDEstimate, r.Unpriced)
 		tot.Invocations += r.Invocations
 		tot.InputTokens += r.InputTokens
 		tot.OutputTokens += r.OutputTokens
@@ -187,13 +183,8 @@ func renderCosts(stdout io.Writer, facts []usage.Fact, byFormula bool, usagePath
 		tot.CostUSDEstimate += r.CostUSDEstimate
 		tot.Unpriced += r.Unpriced
 	}
-	if byFormula {
-		fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
-			tot.Invocations, tot.InputTokens, tot.OutputTokens, tot.CacheReadTokens, tot.CacheCreationTokens, tot.WallSeconds, tot.CostUSDEstimate, tot.Unpriced)
-	} else {
-		fmt.Fprintf(tw, "TOTAL\t\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
-			tot.Invocations, tot.InputTokens, tot.OutputTokens, tot.CacheReadTokens, tot.CacheCreationTokens, tot.WallSeconds, tot.CostUSDEstimate, tot.Unpriced)
-	}
+	fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
+		tot.Invocations, tot.InputTokens, tot.OutputTokens, tot.CacheReadTokens, tot.CacheCreationTokens, tot.WallSeconds, tot.CostUSDEstimate, tot.Unpriced)
 	tw.Flush() //nolint:errcheck
 	if tot.Unpriced > 0 {
 		fmt.Fprintf(stdout, "\nNote: %d invocation(s) had no pricing and are excluded from EST_USD.\n", tot.Unpriced) //nolint:errcheck
@@ -202,22 +193,42 @@ func renderCosts(stdout io.Writer, facts []usage.Fact, byFormula bool, usagePath
 	return 0
 }
 
-// formulaCost is one row of the --by-formula table: the model facts that carry
-// one formula name.
-type formulaCost struct {
-	FormulaName         string
-	Invocations         int
-	InputTokens         int
-	OutputTokens        int
-	CacheReadTokens     int
-	CacheCreationTokens int
-	CostUSDEstimate     float64
-	Unpriced            int
-}
-
-// aggregateFormulaCosts buckets model facts by their own formula name.
-func aggregateFormulaCosts(_ []usage.Fact) []formulaCost {
-	return nil
+// renderFormulaCosts writes the --by-formula table. It has no wall-clock
+// columns: compute facts carry no formula, so any wall figure here would be a
+// number the table cannot attribute.
+func renderFormulaCosts(stdout io.Writer, facts []usage.Fact) int {
+	rows := aggregateFormulaCosts(facts)
+	if len(rows) == 0 {
+		fmt.Fprintln(stdout, "No model usage recorded yet to group by formula.") //nolint:errcheck
+		return 0
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "FORMULA\tINVOCATIONS\tIN\tOUT\tCACHE_R\tCACHE_C\tEST_USD\tUNPRICED") //nolint:errcheck
+	var tot formulaCost
+	for _, r := range rows {
+		name := r.FormulaName
+		if name == "" {
+			name = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%.4f\t%d\n", //nolint:errcheck
+			name, r.Invocations, r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.CostUSDEstimate, r.Unpriced)
+		tot.Invocations += r.Invocations
+		tot.InputTokens += r.InputTokens
+		tot.OutputTokens += r.OutputTokens
+		tot.CacheReadTokens += r.CacheReadTokens
+		tot.CacheCreationTokens += r.CacheCreationTokens
+		tot.CostUSDEstimate += r.CostUSDEstimate
+		tot.Unpriced += r.Unpriced
+	}
+	fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%d\t%.4f\t%d\n", //nolint:errcheck
+		tot.Invocations, tot.InputTokens, tot.OutputTokens, tot.CacheReadTokens, tot.CacheCreationTokens, tot.CostUSDEstimate, tot.Unpriced)
+	tw.Flush() //nolint:errcheck
+	if tot.Unpriced > 0 {
+		fmt.Fprintf(stdout, "\nNote: %d invocation(s) had no pricing and are excluded from EST_USD.\n", tot.Unpriced) //nolint:errcheck
+	}
+	fmt.Fprintln(stdout, "\"-\" is usage with no formula attribution. Wall-seconds are omitted: compute facts carry no formula; see the default table for WALL_S.") //nolint:errcheck
+	fmt.Fprintf(stdout, "Estimates are list-price decision-support, not authoritative charges.\n")                                                                  //nolint:errcheck
+	return 0
 }
 
 func truncRunID(s string) string {

@@ -343,14 +343,12 @@ type SessionHandleConfig struct {
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
-	// Store is the beads store used to resolve formula names from the run-chain
-	// root bead when the session bead carries a molecule_id or workflow_id. Nil
-	// disables the root-bead lookup (formula name falls back to the session
-	// bead's own gc.formula_name metadata, which is empty in production).
-	Store beads.Store
-	// ResolveBead reads one work bead by id, wherever it lives.
+	// ResolveBead reads one work bead by id, wherever it lives. Usage
+	// attribution uses it to find the formula the session's acting bead was
+	// compiled from. Nil leaves facts unattributed.
 	ResolveBead func(id string) (beads.Bead, error)
-	// FormulaMemo remembers the formula an acting bead belongs to.
+	// FormulaMemo remembers the formula an acting bead belongs to. Nil is
+	// valid and resolves on every batch.
 	FormulaMemo *FormulaNameMemo
 }
 
@@ -358,7 +356,8 @@ type SessionHandleConfig struct {
 type SessionHandle struct {
 	mu             sync.Mutex
 	manager        *sessionpkg.Manager
-	store          beads.Store
+	resolveBead    func(id string) (beads.Bead, error)
+	formulaMemo    *FormulaNameMemo
 	adapter        SessionLogAdapter
 	recorder       events.Recorder
 	usageSink      usage.Sink

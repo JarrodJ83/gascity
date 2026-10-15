@@ -1366,6 +1366,11 @@ Cost is a list-price estimate for decision support, not an authoritative
 charge; invocations with no pricing are flagged "unpriced" and excluded from
 the cost total.
 
+With --by-formula, model usage is grouped by the formula the acting bead's run
+was compiled from instead of by run; usage with no formula appears as "-".
+Compute wall-seconds are not attributed to a formula, so that table has no
+WALL_S column.
+
 ```
 gc costs [flags]
 ```
@@ -1374,11 +1379,12 @@ gc costs [flags]
 
 ```
 gc costs
+gc costs --by-formula
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--by-formula` | bool |  | group all runs of the same formula into one aggregated row |
+| `--by-formula` | bool |  | group model usage by the formula each fact is attributed to instead of by run |
 
 ## gc dashboard
 

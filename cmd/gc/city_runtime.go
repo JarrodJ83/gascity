@@ -33,6 +33,7 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -279,6 +280,8 @@ type CityRuntime struct {
 	// and idempotently replays it. Standalone/one-shot runtimes leave this false.
 	transcriptMetaEnabled bool
 	transcriptMetaMu      sync.Mutex
+	formulaMemoOnce       sync.Once
+	formulaNameMemo       *worker.FormulaNameMemo
 	transcriptMetaStarted bool
 	transcriptMetaDone    chan struct{}
 

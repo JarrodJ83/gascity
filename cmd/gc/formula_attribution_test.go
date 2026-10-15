@@ -259,6 +259,11 @@ func TestFormulaBeadResolverSkipsSuspendedRigs(t *testing.T) {
 
 	cityPath := t.TempDir()
 	cfg := residencyTestConfig()
+	// The mem stores mint "gc-" ids, so both rigs carry that prefix: the
+	// suspended rig is one a by-id probe would otherwise reach, which is what
+	// makes its zero reads mean something.
+	cfg.Rigs[0].Prefix = "gc"
+	cfg.Rigs[1].Prefix = "gc"
 	cfg.Rigs[0].Suspended = true
 	cr := &CityRuntime{
 		cfg:                 cfg,
