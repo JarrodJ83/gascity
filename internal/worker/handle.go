@@ -348,6 +348,10 @@ type SessionHandleConfig struct {
 	// disables the root-bead lookup (formula name falls back to the session
 	// bead's own gc.formula_name metadata, which is empty in production).
 	Store beads.Store
+	// ResolveBead reads one work bead by id, wherever it lives.
+	ResolveBead func(id string) (beads.Bead, error)
+	// FormulaMemo remembers the formula an acting bead belongs to.
+	FormulaMemo *FormulaNameMemo
 }
 
 // SessionHandle is the production worker handle backed by session.Manager.

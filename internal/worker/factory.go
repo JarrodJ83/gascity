@@ -47,6 +47,10 @@ type FactoryConfig struct {
 	// once across requests rather than once per request. Nil gives the factory
 	// a private memo.
 	ActivityMemo *DerivedActivityMemo
+	// ResolveBead reads one work bead by id, wherever it lives.
+	ResolveBead func(id string) (beads.Bead, error)
+	// FormulaMemo remembers the formula an acting bead belongs to.
+	FormulaMemo *FormulaNameMemo
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
