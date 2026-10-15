@@ -103,6 +103,7 @@ go_test(
     ],
     embed = [":worker"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/citylayout",
         "//internal/events",

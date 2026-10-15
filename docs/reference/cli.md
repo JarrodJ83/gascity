@@ -1367,7 +1367,7 @@ charge; invocations with no pricing are flagged "unpriced" and excluded from
 the cost total.
 
 ```
-gc costs
+gc costs [flags]
 ```
 
 **Example:**
@@ -1375,6 +1375,10 @@ gc costs
 ```
 gc costs
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--by-formula` | bool |  | group all runs of the same formula into one aggregated row |
 
 ## gc dashboard
 
