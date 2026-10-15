@@ -36,3 +36,12 @@ func (s *Server) workerSessionCatalog(store beads.Store) (*worker.SessionCatalog
 	}
 	return factory.Catalog()
 }
+
+// formulaBeadResolver is the worker's formula-attribution lookup: the acting
+// bead and its run root resolved over this server's residency topology.
+func (s *Server) formulaBeadResolver() func(id string) (beads.Bead, error) {
+	return func(id string) (beads.Bead, error) {
+		_, b, err := s.resolveBeadOwner(id)
+		return b, err
+	}
+}

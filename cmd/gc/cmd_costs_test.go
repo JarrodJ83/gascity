@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"math"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/usage"
@@ -48,62 +51,139 @@ func TestAggregateRunCostsEmpty(t *testing.T) {
 	}
 }
 
-func TestAggregateRunCostsFormulaName(t *testing.T) {
-	facts := []usage.Fact{
-		{RunID: "run-a", FormulaName: "review", Kind: usage.KindModel, InputTokens: 100, CostUSDEstimate: 0.01},
-		{RunID: "run-a", Kind: usage.KindModel, InputTokens: 50, CostUSDEstimate: 0.005}, // no FormulaName on second fact
-		{RunID: "run-b", Kind: usage.KindModel, InputTokens: 20, CostUSDEstimate: 0.002}, // no formula
-	}
-	rows := aggregateRunCosts(facts)
-	if len(rows) != 2 {
-		t.Fatalf("want 2 rows, got %d", len(rows))
-	}
-	if rows[0].FormulaName != "review" {
-		t.Errorf("run-a FormulaName = %q, want %q", rows[0].FormulaName, "review")
-	}
-	if rows[1].FormulaName != "" {
-		t.Errorf("run-b FormulaName = %q, want empty", rows[1].FormulaName)
+// costsFixtureFacts: two formulas, one unattributed, one unpriced, one compute
+// fact. The compute fact carries no formula and no tokens, so it appears in the
+// default table's WALL_S and nowhere in --by-formula.
+func costsFixtureFacts() []usage.Fact {
+	return []usage.Fact{
+		{RunID: "run-a", FormulaName: "review", Kind: usage.KindModel, InputTokens: 100, OutputTokens: 50, CacheReadTokens: 7, CacheCreationTokens: 3, CostUSDEstimate: 0.01},
+		{RunID: "run-a", FormulaName: "build", Kind: usage.KindModel, InputTokens: 40, OutputTokens: 20, CostUSDEstimate: 0.004},
+		{RunID: "run-a", FormulaName: "review", Kind: usage.KindModel, InputTokens: 10, Unpriced: true},
+		{RunID: "run-b", Kind: usage.KindModel, InputTokens: 20, OutputTokens: 5, CostUSDEstimate: 0.002},
+		{RunID: "run-b", Kind: usage.KindCompute, WallSeconds: 12.5},
 	}
 }
 
-func TestAggregateByFormula(t *testing.T) {
-	rows := []runCost{
-		{RunID: "run-a", FormulaName: "review", Invocations: 2, InputTokens: 100, OutputTokens: 50, CostUSDEstimate: 0.01},
-		{RunID: "run-b", FormulaName: "review", Invocations: 1, InputTokens: 40, OutputTokens: 20, CostUSDEstimate: 0.005},
-		{RunID: "run-c", FormulaName: "build", Invocations: 3, InputTokens: 200, CostUSDEstimate: 0.02},
-		{RunID: "run-d", FormulaName: "", Invocations: 1, WallSeconds: 5},
+func renderCostsForTest(t *testing.T, facts []usage.Fact, byFormula bool) string {
+	t.Helper()
+	var out bytes.Buffer
+	if rc := renderCosts(&out, facts, byFormula, "usage.jsonl"); rc != 0 {
+		t.Fatalf("renderCosts rc = %d", rc)
 	}
-	grouped := aggregateByFormula(rows)
-	// Expect 3 groups: "-", "build", "review" (sorted)
-	if len(grouped) != 3 {
-		t.Fatalf("want 3 groups, got %d", len(grouped))
+	return out.String()
+}
+
+func tableRow(out, first string) []string {
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) > 0 && f[0] == first {
+			return f
+		}
 	}
-	if grouped[0].FormulaName != "-" {
-		t.Errorf("group[0] FormulaName = %q, want %q", grouped[0].FormulaName, "-")
+	return nil
+}
+
+// The default table is the table on main: no FORMULA column, no formula state
+// on runCost, one RUN row per run.
+func TestCostsDefaultTableIsUnchangedFromMain(t *testing.T) {
+	out := renderCostsForTest(t, costsFixtureFacts(), false)
+	header := strings.Fields(strings.SplitN(out, "\n", 2)[0])
+	want := []string{"RUN", "INVOCATIONS", "IN", "OUT", "CACHE_R", "CACHE_C", "WALL_S", "EST_USD", "UNPRICED"}
+	if strings.Join(header, " ") != strings.Join(want, " ") {
+		t.Fatalf("default header = %v, want %v", header, want)
 	}
-	if grouped[1].FormulaName != "build" {
-		t.Errorf("group[1] FormulaName = %q, want %q", grouped[1].FormulaName, "build")
+	if got := tableRow(out, "TOTAL"); len(got) != 9 {
+		t.Fatalf("default TOTAL row = %v, want 9 fields (label + 8 numbers)", got)
 	}
-	if grouped[2].FormulaName != "review" {
-		t.Errorf("group[2] FormulaName = %q, want %q", grouped[2].FormulaName, "review")
+	if got := tableRow(out, "run-a"); len(got) != 9 || got[1] != "3" {
+		t.Fatalf("run-a row = %v, want 3 invocations in 9 fields", got)
 	}
-	// "review" group should aggregate both run-a and run-b
-	review := grouped[2]
-	if review.Invocations != 3 {
-		t.Errorf("review Invocations = %d, want 3", review.Invocations)
+}
+
+// --by-formula buckets every fact by its OWN formula name: a run whose facts
+// carry two names lands in two rows.
+func TestCostsByFormulaBucketsPerFact(t *testing.T) {
+	rows := aggregateFormulaCosts(costsFixtureFacts())
+	got := map[string]formulaCost{}
+	for _, r := range rows {
+		got[r.FormulaName] = r
 	}
-	if review.InputTokens != 140 {
-		t.Errorf("review InputTokens = %d, want 140", review.InputTokens)
+	if len(rows) != 3 {
+		t.Fatalf("buckets = %+v, want build, review and the empty bucket", rows)
 	}
-	if review.OutputTokens != 70 {
-		t.Errorf("review OutputTokens = %d, want 70", review.OutputTokens)
+	if r := got["review"]; r.Invocations != 2 || r.InputTokens != 110 || r.OutputTokens != 50 || r.CacheReadTokens != 7 || r.CacheCreationTokens != 3 || r.Unpriced != 1 || r.CostUSDEstimate != 0.01 {
+		t.Fatalf("review = %+v", r)
 	}
-	// "build" group: run-c only
-	if grouped[1].Invocations != 3 {
-		t.Errorf("build Invocations = %d, want 3", grouped[1].Invocations)
+	if r := got["build"]; r.Invocations != 1 || r.InputTokens != 40 {
+		t.Fatalf("build = %+v", r)
 	}
-	// "-" group: run-d only
-	if grouped[0].WallSeconds != 5 {
-		t.Errorf("- WallSeconds = %v, want 5", grouped[0].WallSeconds)
+	if r, ok := got[""]; !ok || r.Invocations != 1 || r.InputTokens != 20 {
+		t.Fatalf("unattributed bucket = %+v (present=%v); compute facts must not count", r, ok)
+	}
+}
+
+func TestCostsByFormulaTable(t *testing.T) {
+	out := renderCostsForTest(t, costsFixtureFacts(), true)
+	header := strings.Fields(strings.SplitN(out, "\n", 2)[0])
+	want := []string{"FORMULA", "INVOCATIONS", "IN", "OUT", "CACHE_R", "CACHE_C", "EST_USD", "UNPRICED"}
+	if strings.Join(header, " ") != strings.Join(want, " ") {
+		t.Fatalf("--by-formula header = %v, want %v (no wall or compute columns)", header, want)
+	}
+	if got := tableRow(out, "-"); got == nil || got[1] != "1" {
+		t.Fatalf("unattributed row = %v, want formula shown as -", got)
+	}
+	if got := tableRow(out, "TOTAL"); len(got) != 8 {
+		t.Fatalf("TOTAL row = %v, want 8 fields", got)
+	}
+	if !strings.Contains(out, "no pricing") {
+		t.Fatalf("missing the no-pricing note:\n%s", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "compute") {
+		t.Fatalf("footnote must say why wall/compute columns are absent:\n%s", out)
+	}
+}
+
+func TestCostsByFormulaEmptyResultMessage(t *testing.T) {
+	// Only a compute fact: the default table has a row, --by-formula has nothing
+	// to bucket and says so in its own words.
+	facts := []usage.Fact{{RunID: "run-b", Kind: usage.KindCompute, WallSeconds: 4}}
+	out := renderCostsForTest(t, facts, true)
+	if strings.Contains(out, "No usage facts recorded yet") {
+		t.Fatalf("--by-formula reused the default empty message:\n%s", out)
+	}
+	if !strings.Contains(out, "No model usage") {
+		t.Fatalf("--by-formula empty message = %q, want one naming model usage", out)
+	}
+}
+
+// T12: the per-formula buckets conserve everything the default table's model
+// columns report, Unpriced included.
+func TestCostsByFormulaConservesDefaultTotals(t *testing.T) {
+	facts := costsFixtureFacts()
+	var dflt runCost
+	for _, r := range aggregateRunCosts(facts) {
+		dflt.Invocations += r.Invocations
+		dflt.InputTokens += r.InputTokens
+		dflt.OutputTokens += r.OutputTokens
+		dflt.CacheReadTokens += r.CacheReadTokens
+		dflt.CacheCreationTokens += r.CacheCreationTokens
+		dflt.CostUSDEstimate += r.CostUSDEstimate
+		dflt.Unpriced += r.Unpriced
+	}
+	var sum formulaCost
+	for _, r := range aggregateFormulaCosts(facts) {
+		sum.Invocations += r.Invocations
+		sum.InputTokens += r.InputTokens
+		sum.OutputTokens += r.OutputTokens
+		sum.CacheReadTokens += r.CacheReadTokens
+		sum.CacheCreationTokens += r.CacheCreationTokens
+		sum.CostUSDEstimate += r.CostUSDEstimate
+		sum.Unpriced += r.Unpriced
+	}
+	if sum.Invocations != dflt.Invocations || sum.InputTokens != dflt.InputTokens || sum.OutputTokens != dflt.OutputTokens ||
+		sum.CacheReadTokens != dflt.CacheReadTokens || sum.CacheCreationTokens != dflt.CacheCreationTokens || sum.Unpriced != dflt.Unpriced {
+		t.Fatalf("buckets %+v do not conserve default totals %+v", sum, dflt)
+	}
+	if math.Abs(sum.CostUSDEstimate-dflt.CostUSDEstimate) > 1e-9 {
+		t.Fatalf("EST_USD buckets = %v, default = %v", sum.CostUSDEstimate, dflt.CostUSDEstimate)
 	}
 }

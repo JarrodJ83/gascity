@@ -144,6 +144,12 @@ func doCosts(stdout, stderr io.Writer, byFormula bool) int {
 	for _, w := range warnings {
 		fmt.Fprintf(stderr, "gc costs: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
+	return renderCosts(stdout, facts, byFormula, usagePath)
+}
+
+// renderCosts writes the costs table for facts to stdout. usagePath only names
+// the log in the empty-result message.
+func renderCosts(stdout io.Writer, facts []usage.Fact, byFormula bool, usagePath string) int {
 	rows := aggregateRunCosts(facts)
 	if byFormula {
 		rows = aggregateByFormula(rows)
@@ -194,6 +200,24 @@ func doCosts(stdout, stderr io.Writer, byFormula bool) int {
 	}
 	fmt.Fprintf(stdout, "Estimates are list-price decision-support, not authoritative charges.\n") //nolint:errcheck
 	return 0
+}
+
+// formulaCost is one row of the --by-formula table: the model facts that carry
+// one formula name.
+type formulaCost struct {
+	FormulaName         string
+	Invocations         int
+	InputTokens         int
+	OutputTokens        int
+	CacheReadTokens     int
+	CacheCreationTokens int
+	CostUSDEstimate     float64
+	Unpriced            int
+}
+
+// aggregateFormulaCosts buckets model facts by their own formula name.
+func aggregateFormulaCosts(_ []usage.Fact) []formulaCost {
+	return nil
 }
 
 func truncRunID(s string) string {
