@@ -280,10 +280,14 @@ type CityRuntime struct {
 	// and idempotently replays it. Standalone/one-shot runtimes leave this false.
 	transcriptMetaEnabled bool
 	transcriptMetaMu      sync.Mutex
-	formulaMemoOnce       sync.Once
-	formulaNameMemo       *worker.FormulaNameMemo
 	transcriptMetaStarted bool
 	transcriptMetaDone    chan struct{}
+
+	// formulaNameMemo is the process-lifetime memo of acting bead id to formula
+	// name for usage attribution, built once through formulaMemoOnce. Neither
+	// field is guarded by transcriptMetaMu.
+	formulaMemoOnce sync.Once
+	formulaNameMemo *worker.FormulaNameMemo
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
