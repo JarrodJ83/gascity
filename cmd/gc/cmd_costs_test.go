@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/usage"
 )
@@ -185,5 +186,34 @@ func TestCostsByFormulaConservesDefaultTotals(t *testing.T) {
 	}
 	if math.Abs(sum.CostUSDEstimate-dflt.CostUSDEstimate) > 1e-9 {
 		t.Fatalf("EST_USD buckets = %v, default = %v", sum.CostUSDEstimate, dflt.CostUSDEstimate)
+	}
+}
+
+// A formula name is pack-authored text; the table must not hand a terminal
+// escape sequence through to the operator, and the bucket must still be one
+// row per distinct name.
+func TestCostsByFormulaNeutralizesControlCharactersInTheName(t *testing.T) {
+	hostile := "evil\x1b[31m\x07\nname"
+	facts := []usage.Fact{
+		{RunID: "run-a", FormulaName: hostile, Kind: usage.KindModel, InputTokens: 10},
+		{RunID: "run-a", FormulaName: hostile, Kind: usage.KindModel, InputTokens: 5},
+	}
+	out := renderCostsForTest(t, facts, true)
+	for _, r := range out {
+		if r != '\n' && r != '\t' && unicode.IsControl(r) {
+			t.Fatalf("--by-formula output holds control character %U:\n%q", r, out)
+		}
+	}
+	var row string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "evil") {
+			row = line
+		}
+	}
+	if !strings.Contains(row, "name") {
+		t.Fatalf("--by-formula split or lost the name across lines (row %q):\n%s", row, out)
+	}
+	if got := strings.Count(out, "evil"); got != 1 {
+		t.Fatalf("--by-formula printed the one distinct name %d times, want 1:\n%s", got, out)
 	}
 }

@@ -5,7 +5,9 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/spf13/cobra"
@@ -206,7 +208,7 @@ func renderFormulaCosts(stdout io.Writer, facts []usage.Fact) int {
 	fmt.Fprintln(tw, "FORMULA\tINVOCATIONS\tIN\tOUT\tCACHE_R\tCACHE_C\tEST_USD\tUNPRICED") //nolint:errcheck
 	var tot formulaCost
 	for _, r := range rows {
-		name := r.FormulaName
+		name := printableFormulaName(r.FormulaName)
 		if name == "" {
 			name = "-"
 		}
@@ -229,6 +231,19 @@ func renderFormulaCosts(stdout io.Writer, facts []usage.Fact) int {
 	fmt.Fprintln(stdout, "\"-\" is usage with no formula attribution. Wall-seconds are omitted: compute facts carry no formula; see the default table for WALL_S.") //nolint:errcheck
 	fmt.Fprintf(stdout, "Estimates are list-price decision-support, not authoritative charges.\n")                                                                  //nolint:errcheck
 	return 0
+}
+
+// printableFormulaName replaces control characters in a formula name with
+// '?' so a pack-authored name cannot carry a terminal escape sequence or a
+// line break into the --by-formula table. Buckets are keyed on the raw name;
+// only what is printed changes.
+func printableFormulaName(name string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, name)
 }
 
 func truncRunID(s string) string {
