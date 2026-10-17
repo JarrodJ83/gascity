@@ -32,6 +32,7 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		ResolveBead:           s.formulaBeadResolver(),
 		FormulaMemo:           s.formulaMemo,
 		RuntimeLeaseTTL:       session.RuntimeLeaseTTLFor(cfg),
+		DeferredSubmits:       s.state.NudgeQueue(),
 	})
 }
 

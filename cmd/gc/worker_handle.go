@@ -110,6 +110,9 @@ func workerFactoryWithAttribution(
 		RuntimeLeaseTTL:         session.RuntimeLeaseTTLFor(cfg),
 		ResolveBead:             resolveBead,
 		FormulaMemo:             memo,
+		// The zero store resolves no class store: a deferred submit writes
+		// no shadow, so it opens nothing.
+		DeferredSubmits: openNudgeQueue(cityPath, beads.NudgesStore{}).Queue,
 	})
 }
 
