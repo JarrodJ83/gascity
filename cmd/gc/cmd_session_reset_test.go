@@ -67,8 +67,7 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -137,8 +136,7 @@ func TestCmdSessionReset_ProviderConstructionFailureReturnsError(t *testing.T) {
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -217,8 +215,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -235,8 +232,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -331,8 +327,7 @@ func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -396,8 +391,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -414,8 +408,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -971,8 +964,7 @@ func startSessionResetTestController(t *testing.T, cityDir string) {
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)

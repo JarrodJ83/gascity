@@ -47,6 +47,17 @@ var (
 	// dispatch (unknown/unwired sink, policy) — distinct from validation-failed,
 	// which is huma's schema-validation auto-stamp.
 	WebhookRejected = Register(ProblemType{Code: "webhook-rejected", Status: http.StatusUnprocessableEntity, Title: "Webhook Rejected"})
+	// DemandOnlySingleton refuses a session create or wake for a pool agent
+	// with max_active_sessions = 1 and no [[named_session]]: the controller
+	// starts its one session only from pool demand. The request is well-formed;
+	// the client recovers by slinging work to the agent or declaring a named
+	// session, not by fixing the request.
+	DemandOnlySingleton = Register(ProblemType{Code: "demand-only-singleton", Status: http.StatusBadRequest, Title: "Demand-Only Singleton Agent"})
+	// WakeWillNotStart reports a recorded wake the controller will not act
+	// on (an idle-latched row, a suspended rig or agent, no runnable template,
+	// a dependency-only row, a startup-health quarantine). The client
+	// recovers by fixing that condition, not the request.
+	WakeWillNotStart = Register(ProblemType{Code: "wake-will-not-start", Status: http.StatusConflict, Title: "Wake Recorded But Will Not Start"})
 
 	// Concurrency / state conflicts. concurrent-delete/concurrent-modify are
 	// retryable lost-update races (the target changed under the write); wrong-state
@@ -88,6 +99,26 @@ var (
 	// Idempotency (two-phase reserve/complete).
 	IdempotencyInFlight = Register(ProblemType{Code: "idempotency-in-flight", Status: http.StatusConflict, Title: "Idempotency Key In Flight"})
 	IdempotencyMismatch = Register(ProblemType{Code: "idempotency-mismatch", Status: http.StatusUnprocessableEntity, Title: "Idempotency Key Body Mismatch"})
+	// InvalidIdempotencyKey is an Idempotency-Key the operation journal
+	// cannot record under (empty after trimming, over 512 bytes, control
+	// characters, leading or trailing space). Only an ops gate in require
+	// refuses it; auto runs such a request unrecorded.
+	InvalidIdempotencyKey = Register(ProblemType{Code: "invalid-idempotency-key", Status: http.StatusUnprocessableEntity, Title: "Invalid Idempotency Key"})
+
+	// Operation journal (DES-O0API D12): refusals of an ops gate in require,
+	// made before the request is delivered. A request to a configured named
+	// session with no row is checked for these before the session is
+	// materialized, except a store that opens but cannot write the op row:
+	// that refusal comes after the materialization, which require needs to
+	// name the op's conversation (§6.4).
+	//
+	// OpJournalUnavailable is an op store that cannot record the request
+	// (no conditional writes, no op bead type, a store error). The client may
+	// retry; nothing was delivered.
+	OpJournalUnavailable = Register(ProblemType{Code: "op-journal-unavailable", Status: http.StatusServiceUnavailable, Title: "Operation Journal Unavailable"})
+	// PayloadTooLarge is a request payload over the operation journal's
+	// 16 KiB inline limit.
+	PayloadTooLarge = Register(ProblemType{Code: "payload-too-large", Status: http.StatusUnprocessableEntity, Title: "Payload Too Large"})
 
 	// Backend availability. store-unavailable is the bead-store-not-live 503 emitted
 	// by the shared cacheLiveOr503 helper; service-unavailable is the generic 503

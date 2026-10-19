@@ -34,7 +34,7 @@ func (p *rewriteConfigOnListProvider) ListRunning(prefix string) ([]string, erro
 	return p.Fake.ListRunning(prefix)
 }
 
-func stubReloadBeadsLifecycle(t *testing.T, fn func(string, string, *config.City, io.Writer) error) {
+func stubReloadBeadsLifecycle(t *testing.T, fn func(string, string, *config.City, cityStoreRecord, io.Writer) error) {
 	t.Helper()
 	previous := cityRuntimeStartBeadsLifecycle
 	cityRuntimeStartBeadsLifecycle = fn
@@ -148,10 +148,11 @@ func TestCityRuntimeReloadRejectsRevisionSupersededDuringPreparation(t *testing.
 	cr, cs, initialCfg := newPublicationTestRuntime(t, cityPath, provider, io.Discard, &stderr)
 
 	oldCfg, oldProvider, oldDops, oldRevision := cr.cfg, cr.sp, cr.dops, cr.configRev
+	oldOD, oldOrderGeneration := cr.od, cr.ordersLaneOf().generation
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	// A newer config lands on disk while the reload is still preparing its
 	// candidate (here: during the bead lifecycle step).
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error {
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		return os.WriteFile(tomlPath, []byte(supersedingCityConfig), 0o644)
 	})
 
@@ -166,6 +167,11 @@ func TestCityRuntimeReloadRejectsRevisionSupersededDuringPreparation(t *testing.
 	}
 	if cs.Config() != initialCfg || cs.SessionProvider() != provider {
 		t.Fatal("superseded reload changed the API-visible runtime generation")
+	}
+	// The orders lane stays on the controller's generation too: nothing is
+	// staged, installed, or bumped for a rejected candidate.
+	if lane := cr.ordersLaneOf(); cr.od != oldOD || lane.hasPending || lane.generation != oldOrderGeneration {
+		t.Fatal("superseded reload staged or installed an order dispatcher")
 	}
 	if cr.configDirty == nil || !cr.configDirty.Load() {
 		t.Fatal("superseded reload did not leave a retry pending")
@@ -185,7 +191,7 @@ func TestCityRuntimeReloadSupersededByAPIMutationConvergesOnRetry(t *testing.T) 
 	oldCfg, oldRevision := cr.cfg, cr.configRev
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	mutated := false
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error {
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		if mutated {
 			return nil
 		}
@@ -228,7 +234,7 @@ func TestCityRuntimeProviderReloadSupersededDuringCensusDoesNotPublishSwap(t *te
 	var stdout bytes.Buffer
 	cr, cs, _ := newPublicationTestRuntime(t, cityPath, provider, &stdout, io.Discard)
 
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error { return nil })
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
 	writeCityRuntimeConfig(t, tomlPath, "fail")
 	provider.rewrite = func() {
 		if err := os.WriteFile(tomlPath, []byte(supersedingCityConfig), 0o644); err != nil {
@@ -264,7 +270,7 @@ func TestCityRuntimeProviderReloadAlreadySupersededSkipsProviderEffects(t *testi
 	cr, cs, _ := newPublicationTestRuntime(t, cityPath, provider, &stdout, io.Discard)
 
 	writeCityRuntimeConfig(t, tomlPath, "fail")
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error {
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		return os.WriteFile(tomlPath, []byte(supersedingCityConfig), 0o644)
 	})
 	listed := false
