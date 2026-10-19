@@ -162,3 +162,91 @@ func TestFactorySweepSessionModelUsageOpenCodeSharedWorkdir(t *testing.T) {
 		t.Errorf("re-sweep = %d, %v; want 0, nil", emitted, err)
 	}
 }
+
+// TestFactorySweepSessionModelUsageOpenCodeKeyedMissNoWorkdirFallback sweeps a
+// lone OpenCode session whose own export is not mirrored yet while another
+// conversation's export for the same workdir sits in the search root. The keyed
+// miss must record nothing and leave the cursor alone rather than fall back to
+// that stray export; once the session's own export lands, its facts are emitted.
+func TestFactorySweepSessionModelUsageOpenCodeKeyedMissNoWorkdirFallback(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
+		Store:       store,
+		Provider:    runtime.NewFake(),
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileOpenCodeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe ses_ccc",
+		Command:  "opencode",
+		WorkDir:  workDir,
+		Provider: "opencode",
+		Metadata: map[string]string{"agent_name": "myrig/ses_ccc"},
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := store.SetMetadata(h.sessionID, "session_key", "ses_ccc"); err != nil {
+		t.Fatal(err)
+	}
+	id := h.sessionID
+	meta := func() map[string]string {
+		t.Helper()
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b.Metadata
+	}
+
+	write := func(key, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(searchBase, key+".json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The stray export records the session's own workdir, so a workdir fallback
+	// would resolve it.
+	write("ses_stray", fmt.Sprintf(`{"info":{"id":"ses_stray","directory":%q},"messages":[%s]}`, workDir,
+		openCodeAssistantJSON("msg_stray", "deepseek/deepseek-v4.1-flash", 500, 5, `"cost":0.1,`, 1792100000000)))
+
+	now := time.Unix(1, 0).UTC()
+	if emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, meta(), now); err != nil || settled || emitted != 0 {
+		t.Fatalf("keyed-miss sweep = %d, %v, %v; want 0, false, nil", emitted, settled, err)
+	}
+	if got := meta()[sessionpkg.MetadataKeyInvocationUsageCursor]; got != "" {
+		t.Fatalf("cursor advanced to %q on a keyed miss", got)
+	}
+	if facts, _, err := usage.ReadFacts(sinkPath); err == nil && len(facts) != 0 {
+		t.Fatalf("keyed miss emitted facts: %+v", facts)
+	}
+
+	write("ses_ccc", openCodeExportJSON("ses_ccc",
+		openCodeAssistantJSON("msg_c1", "deepseek/deepseek-v4.1-flash", 1000, 10, `"cost":0.5,`, 1792100100000)))
+	if emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, meta(), now); err != nil || !settled || emitted != 1 {
+		t.Fatalf("keyed-hit sweep = %d, %v, %v; want 1, true, nil", emitted, settled, err)
+	}
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(facts) != 1 || facts[0].UpstreamReqID != "msg_c1" {
+		t.Fatalf("facts = %+v, want only msg_c1", facts)
+	}
+	if got := meta()[sessionpkg.MetadataKeyInvocationUsageCursor]; got != "msg_c1" {
+		t.Errorf("cursor = %q, want msg_c1", got)
+	}
+}

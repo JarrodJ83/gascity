@@ -55,9 +55,10 @@ func defaultPricingRegistry() *pricing.Registry {
 //   - claude: Manager.TranscriptPath (session-key stat or ambiguity-guarded
 //     project-slug listing — cheap) + the Claude JSONL tail extractor.
 //   - opencode: the session's own export, mirrored under the OpenCode
-//     transcript root as <session_key>.json. Resolved by that key through
-//     Manager.TranscriptPath; never by workdir, because sessions sharing a
-//     workdir would otherwise be attributed each other's export. The whole
+//     transcript root as <session_key>.json. Resolved by that key alone via
+//     sessionlog.FindOpenCodeSessionFileByID; a keyed miss (or no key yet)
+//     records nothing. Never by workdir, because sessions sharing a workdir
+//     would otherwise be attributed each other's export. The whole
 //     export is parsed (it is one JSON document, not an append-only log) and
 //     the provider-reported cost is preferred over the price table.
 //   - codex: identity-first. When the session bead carries a session_key
@@ -325,7 +326,7 @@ var invocationUsageSpecs = map[string]invocationUsageSpec{
 		extract:  SessionLogAdapter.CodexTailUsage,
 	},
 	"opencode": {
-		discover: discoverInvocationTranscriptViaManager,
+		discover: discoverOpenCodeInvocationTranscript,
 		extract:  SessionLogAdapter.OpenCodeTailUsage,
 	},
 }
@@ -410,6 +411,15 @@ func discoverCodexInvocationTranscript(h *SessionHandle, _ string, createdAt tim
 		anchor,
 		codexInvocationDiscoveryWindow,
 	)
+}
+
+// discoverOpenCodeInvocationTranscript resolves an OpenCode session's mirrored
+// export by its session_key, which names the file. A keyed miss returns "" with
+// NO workdir fallback: the newest export in a shared workdir may belong to
+// another conversation, and attributing it would be misattribution. A session
+// without a key yet likewise records nothing.
+func discoverOpenCodeInvocationTranscript(h *SessionHandle, _ string, _ time.Time, meta map[string]string) string {
+	return sessionlog.FindOpenCodeSessionFileByID(h.adapter.SearchPaths, strings.TrimSpace(meta["session_key"]))
 }
 
 // usageIdentity returns the dedup identity of one invocation: the provider
@@ -748,7 +758,9 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 
 // discoverSweepTranscript resolves the transcript for the end-of-interval model
 // sweep: claude through the manager's keyed lookup, codex through the captured
-// session_key matched against the rollout filename suffix. The codex lookup is
+// session_key matched against the rollout filename suffix, opencode through the
+// session_key that names its mirrored export (keyed only; a miss is transient
+// and never falls back to the workdir). The codex lookup is
 // bounded to the awake interval's day window via
 // sessionlog.FindCodexSessionFileByID(notBefore=awake_started_at,
 // notAfter=slept_at||now) — NOT the unbounded date-tree walk — because this runs
@@ -781,8 +793,8 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 // same-cwd rollout, making the singleton non-definitive), so the caller retries
 // rather than recording or settling either. For the claude manager lookup it is
 // false when the transcript lookup returned an error — a store read failure, which
-// says nothing about whether a transcript exists. The keyed codex lookup always
-// returns scanClean true.
+// says nothing about whether a transcript exists. The keyed codex and opencode
+// lookups always return scanClean true.
 //
 // The returned emptyIsPermanent is meaningful only when path is empty on a CLEAN
 // lookup: it reports whether a retry could ever resolve the miss. It is true for
@@ -813,6 +825,13 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 		scanPath, scanClean := sessionlog.FindCodexSessionFileNearScan(
 			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
 		return scanPath, scanClean, true
+	case "opencode":
+		// Keyed only, like discoverOpenCodeInvocationTranscript: the export is
+		// named for the session_key, and the manager's workdir fallback could
+		// hand back another conversation's export. A miss (or no key yet) is
+		// transient — the export may not be mirrored yet.
+		return sessionlog.FindOpenCodeSessionFileByID(
+			f.searchPaths, strings.TrimSpace(meta["session_key"])), true, false
 	default:
 		path, lookup, terr := f.manager.TranscriptPathClassified(id, f.searchPaths)
 		if terr != nil {
