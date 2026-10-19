@@ -672,6 +672,10 @@ func classifyQueuedNudgeIDs(cityPath string, ids []string, now time.Time) (map[s
 }
 
 func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	// One composed city-config load for the whole invocation: the target
+	// resolution, the step reminder and every store open each loaded it again
+	// (see invocationConfigMemo).
+	defer beginInvocationConfigMemo()()
 	// --inject writes a <system-reminder> straight into a provider's system
 	// prompt, and gc stages the overlays that call it into the session work
 	// directory — commonly a city or rig root — so a human who opens the same
@@ -726,6 +730,20 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		return 1
 	}
 
+	// The step reminder is the slowest read a drain makes: in process it opens
+	// the rig store at GC_RIG_ROOT and scans that rig by gc.routed_to once per
+	// identity. Ask the controller for it now, so the request runs while the
+	// target resolves; both paths below take it for the city the explicit
+	// environment names, which is the city they resolve.
+	var stepLookup *wispStepLookup
+	explicitCity, explicit := "", false
+	if inject {
+		if explicitCity, explicit = nudgeDrainExplicitCityPath(); explicit {
+			stepLookup = startWispStepLookup(explicitCity, stderr)
+			defer stepLookup.stop()
+		}
+	}
+
 	// Empty-queue fast path. Resolving the target loads the city config and
 	// opens the session store, and on an empty queue the only things it would
 	// feed are the context advisory (which renders nothing for a payload with
@@ -735,13 +753,13 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// resolution; a queued item or a usage sample takes the full path.
 	wispPrefetched := false
 	if inject && !contextUsage.ok {
-		if cityPath, ok := nudgeDrainExplicitCityPath(); ok && nudgeQueueIsEmpty(cityPath) {
-			wispExtra = wispStepInjectionContent(cityPath)
+		if explicit && nudgeQueueIsEmpty(explicitCity) {
+			wispExtra = stepLookup.content()
 			wispPrefetched = true
 			// The full path writes the step reminder only once the target
 			// resolves, so a non-empty reminder still needs that proof. Recheck
 			// the queue too: a nudge enqueued during the lookup must be claimed.
-			if wispExtra == "" && nudgeQueueIsEmpty(cityPath) {
+			if wispExtra == "" && nudgeQueueIsEmpty(explicitCity) {
 				return 0
 			}
 		}
@@ -752,8 +770,11 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	target, err := resolveNudgeTargetPreferringHookIdentity(targetID, len(args) == 0, stderr)
 	if err != nil {
 		if inject {
-			if errors.Is(err, errHookSessionClosed) {
+			switch {
+			case errors.Is(err, errHookSessionClosed):
 				fmt.Fprintf(stderr, "gc nudge drain: %v; not draining its nudges\n", err) //nolint:errcheck
+			case isControlPlaneDescriptorError(err):
+				fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
 			}
 			wispExtra = ""
 			injectPrefix += contextInjectLineForSample(contextUsage, nil, nil)
@@ -765,7 +786,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	if inject {
 		injectPrefix += contextInjectLineForSample(contextUsage, target.cfg.AgentDefaults.ContextAdvisory, target.agent.ContextAdvisory)
 		if !wispPrefetched {
-			wispExtra = wispStepInjectionContent(target.cityPath)
+			wispExtra = stepLookup.contentFor(target.cityPath)
 		}
 	}
 
@@ -1451,6 +1472,28 @@ func managedNudgeWakeSkipReason(target nudgeTarget, sessFront *session.Store) st
 	}
 }
 
+// requestWorkerSiteNudgeWake is a courtesy nudge's worker-site arm (gc sling's
+// "Work slung", gc mail's new-mail notice). The box queues no text, since its
+// nudge queue is a local file the remote controller never reads, and its
+// guard types into no runtime. What reaches the remote controller is the
+// session's wake on the ledger, recorded never over an operator's hold. A
+// target with no session bead, or a command with no store, records nothing
+// and reports zero: the routed bead or the mail is on the ledger either way.
+func requestWorkerSiteNudgeWake(target nudgeTarget, store beads.Store) (session.WakeRequestOutcome, error) {
+	if store == nil || target.sessionID == "" {
+		return 0, nil
+	}
+	sessFront := cliSessionFrontDoor(store, target.cfg, target.cityPath)
+	if !sessFront.Backed() {
+		return 0, nil
+	}
+	outcome, err := sessFront.RequestWakeUnlessHeld(target.sessionID, false, time.Now().UTC())
+	if err != nil {
+		return 0, fmt.Errorf("recording the wake for %s: %w", target.agentKey(), err)
+	}
+	return outcome, nil
+}
+
 func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {
 	if target.sessionName != "" {
 		if target.sessionID != "" || target.continuationEpoch != "" {
@@ -1659,7 +1702,24 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider) error {
 	return sendMailNotifyWithWorker(target, nil, sp, "human", "")
 }
 
+// sendMailNotifyWithWorker tells target it has mail from sender. On a worker
+// site it records only the recipient's wake (requestWorkerSiteNudgeWake), the
+// one notice a box can leave, and returns errWorkerSiteNotifyNotDelivered when
+// it recorded none.
 func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender, messageID string) error {
+	if onWorkerSite(target.cityPath) {
+		outcome, err := requestWorkerSiteNudgeWake(target, store)
+		if err != nil {
+			return err
+		}
+		if outcome != session.WakeRecorded {
+			return errWorkerSiteNotifyNotDelivered
+		}
+		if nudgeWarningWriter != nil {
+			fmt.Fprintf(nudgeWarningWriter, "gc mail notify: %s\n", workerSiteNudgeNotice(outcome)) //nolint:errcheck // best-effort warning
+		}
+		return nil
+	}
 	msg := fmt.Sprintf("You have mail from %s", sender)
 	now := time.Now()
 	// Carry the mail message ID as the nudge's re-validation reference so
@@ -1750,6 +1810,9 @@ func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdent
 	if err != nil {
 		return nudgeTarget{}, err
 	}
+	// The load ran the builtin readiness pass the routing read needs; resolve
+	// the routes alongside the store open (prewarmCLIStorageRoutes).
+	defer prewarmCLIStorageRoutes(cityPath)()
 	return resolveNudgeTargetInStore(cityPath, cfg, openNudgeBeadStore(cityPath), identifier, preferHookIdentity)
 }
 
@@ -2118,6 +2181,37 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	// races concurrent acquirers — see reapStaleNudgePoller). Best-effort:
 	// never block a spawn.
 	_ = reapStaleNudgePollers(target.cityPath)
+	startNudgePollerUnlessDispatched(target)
+}
+
+// startNudgePollerReap reaps cityPath's stale poller PID files in the
+// background and returns the wait for it. `gc prime --hook` reaps this way
+// while it does its own reads, and starts its poller with
+// startNudgePollerUnlessDispatched: the reap lists the whole pollers
+// directory, which keeps a lock file for every session that ever ran a poller
+// (97k entries and 0.14-0.21 s on maintainer-city), and the spawn decision
+// does not depend on it, since ensureNudgePoller checks its own PID file under
+// the same per-file lock the reap takes.
+func startNudgePollerReap(cityPath string) (wait func()) {
+	reap := nudgePollerReaper
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = reap(cityPath)
+	}()
+	return func() { <-done }
+}
+
+// nudgePollerReaper is the reap startNudgePollerReap runs: a seam, so a test
+// can see when it starts.
+var nudgePollerReaper = reapStaleNudgePollers
+
+// startNudgePollerUnlessDispatched is maybeStartNudgePoller without the reap,
+// for a caller that reaps the pollers directory itself (startNudgePollerReap).
+func startNudgePollerUnlessDispatched(target nudgeTarget) {
+	if target.sessionName == "" {
+		return
+	}
 	// Supervisor-hosted dispatcher owns delivery in supervisor mode; the
 	// per-session poller would race with it and reintroduce the bd-shellout
 	// load it was designed to eliminate.
@@ -2678,11 +2772,18 @@ func nudgeQueueIsEmpty(cityPath string) bool {
 // explicit city environment alone decides it: no --city/--rig flag and no
 // remote selector outranks GC_CITY/GC_CITY_PATH/GC_CITY_ROOT. Unlike
 // resolveCity it does not load the city config to name a rig.
+//
+// The city's control-plane gate applies here too: a city whose descriptor
+// cannot be used is not taken, so the full path's resolution refuses it.
 func nudgeDrainExplicitCityPath() (string, bool) {
 	if cityFlag != "" || rigFlag != "" || readRemoteSelection().hasExplicitRemote() {
 		return "", false
 	}
-	return resolveExplicitCityPathEnv()
+	cityPath, ok := resolveExplicitCityPathEnv()
+	if !ok || gateControlPlaneAt(cityPath) != nil {
+		return "", false
+	}
+	return cityPath, true
 }
 
 // claimDueQueuedNudgesForTarget claims every due nudge for target, pinned or

@@ -52,6 +52,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"InventoryProvider":               reflect.TypeFor[runtime.InventoryProvider](),
 	"KeyedNudgeProvider":              reflect.TypeFor[runtime.KeyedNudgeProvider](),
 	"ListingAttestation":              reflect.TypeFor[runtime.ListingAttestation](),
+	"LocalTranscriptProvider":         reflect.TypeFor[runtime.LocalTranscriptProvider](),
 	"LivenessObserver":                reflect.TypeFor[runtime.LivenessObserver](),
 	"LivenessObserverWithError":       reflect.TypeFor[runtime.LivenessObserverWithError](),
 	"ProcessTableScanner":             reflect.TypeFor[runtime.ProcessTableScanner](),
@@ -157,17 +158,30 @@ current-context: c
 		runtime.ProfileSubprocess: subprocess.NewSeamBacked(),
 		runtime.ProfileHerdr:      herdr.New("city", t.TempDir(), t.TempDir(), 0, 0),
 		runtime.ProfileK8s:        kube,
-		runtime.ProfileExec:       exec.NewSeamBacked("/bin/true"),
+		runtime.ProfileExec:       exec.NewSeamBacked(execConnectionPack(t)),
 		runtime.ProfileSSH:        ssh.NewSeamBacked(ep),
 		runtime.ProfileT3Bridge:   t3bridge.NewSeamBacked(),
 	}
+}
+
+// execConnectionPack is an exec pack that declares the exec connection and
+// input fencing (proc.exec, input-fence) alone, the tmux-in-a-box shape the
+// exec profile models, and answers every other op as /bin/true does.
+func execConnectionPack(t *testing.T) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "pack")
+	body := "#!/bin/sh\n[ \"$1\" = protocol ] && echo '{\"version\":0,\"capabilities\":[\"proc.exec\",\"input-fence\"]}'\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
 }
 
 // Kills a profile that drifts from its backend: one optional interface more
 // or fewer than the provider production builds, other capabilities, another
 // answer from a fixed trait (sleep capability, fresh reads, an identity
 // sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
-// fencing), or no
+// fencing, local transcripts), or no
 // backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
@@ -193,7 +207,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -214,6 +228,9 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.FencedInputProvider); ok {
 		out[6] = string(f.InputFencing("s"))
+	}
+	if f, ok := p.(runtime.LocalTranscriptProvider); ok {
+		out[7] = strconv.FormatBool(f.LocalTranscripts())
 	}
 	return strings.Join(out, " ")
 }

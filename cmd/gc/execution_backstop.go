@@ -478,16 +478,16 @@ func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same 
 }
 
 // content is the agent's configured claim nudge. A seat whose stamp shows the
-// marker's claim started this incarnation gets the pool default when none is
-// configured (stalledPoolClaimNudgeFor, the claim backstop's fallback): its
-// escalation is vetoed, so with nothing to send it would wait at its prompt
-// forever. A seat seen started on a pass whose stamp write failed gets no
+// marker's claim started this incarnation gets the held-claim default when
+// none is configured (heldClaimNudgeFor: the started-rung text, which names
+// the claim and carries no --drain-ack, mc-ilr3b): its escalation is vetoed, so with nothing to
+// send it would wait at its prompt forever. A seat seen started on a pass whose stamp write failed gets no
 // default; escalatesNext holds it until the stamp lands. A started seat whose
 // template names no configured agent gets no default either, and is held as
 // executing, as in the stamp-failure case.
 func (p poolExecutionBackstop) content(s beads.Bead) string {
 	if p.markedStarted(s, s.Metadata[executionClaimNudgeWorkKey]) {
-		return stalledPoolClaimNudgeFor(p.cfg, s)
+		return heldClaimNudgeFor(p.cfg, s, s.Metadata[executionClaimNudgeWorkKey])
 	}
 	return claimNudgeFor(p.cfg, s)
 }
@@ -497,22 +497,29 @@ func (p poolExecutionBackstop) content(s beads.Bead) string {
 // CachingStore-backed, so a plain read can still show a claim the agent finished
 // seconds ago. A failed read HOLDS: it is not proof the claim went away.
 func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolution {
+	res, _ := revalidateExecutionClaim(target)
+	return res
+}
+
+// revalidateExecutionClaim is revalidate's verdict on target, with the
+// claim as the live read found it (the zero bead when it held).
+func revalidateExecutionClaim(target backstopTarget) (backstopResolution, beads.Bead) {
 	if target.Store == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	live := beads.HandlesFor(target.Store).Live
 	if live == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	current, err := live.Get(target.ID)
 	if err != nil || current.ID != target.ID {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "in_progress") ||
 		strings.TrimSpace(current.Assignee) != target.Assignee {
-		return backstopResolutionClear
+		return backstopResolutionClear, current
 	}
-	return backstopResolutionOutstanding
+	return backstopResolutionOutstanding, current
 }
 
 // executionEvidenceTailBytes bounds how far back the execution-evidence read
