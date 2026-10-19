@@ -638,7 +638,7 @@ func TestSweepFormulaResolutionReadCounts(t *testing.T) {
 		}
 		wantNames(t, rig.formulaNames(), attrFormulaA, attrFormulaA)
 	})
-	t.Run("not found is cached", func(t *testing.T) {
+	t.Run("not found is not cached", func(t *testing.T) {
 		resolver := newCountingResolver(beads.NewMemStore())
 		rig := newFormulaRig(t, FactoryConfig{ResolveBead: resolver.get, FormulaMemo: NewFormulaNameMemo()})
 		rig.point("gone-1")
@@ -650,9 +650,10 @@ func TestSweepFormulaResolutionReadCounts(t *testing.T) {
 		}
 		rig.addUsage("msg-2")
 		rig.sweep()
-		if got := resolver.count(); got != first {
-			t.Fatalf("a cached ErrNotFound must not be re-read: reads %d -> %d", first, got)
+		if got := resolver.count(); got <= first {
+			t.Fatalf("an ErrNotFound must be re-read on the next batch: reads %d -> %d", first, got)
 		}
+		wantNames(t, rig.formulaNames(), "", "")
 	})
 	t.Run("other errors are not cached", func(t *testing.T) {
 		backend := beads.NewMemStore()

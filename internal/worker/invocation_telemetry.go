@@ -404,6 +404,11 @@ func actingBeadID(meta map[string]string) string {
 	return strings.TrimSpace(meta[beadmeta.TriggerBeadIDMetadataKey])
 }
 
+// errFormulaBeadAbsent is formulaOfActingBead's verdict that the acting bead or
+// its run root does not exist where the resolver looks. It is an error so the
+// memo does not keep it: the bead may be reachable on a later lookup.
+var errFormulaBeadAbsent = errors.New("usage attribution: acting bead or run root not found")
+
 // resolveFormulaName returns the formula the session's acting bead belongs to:
 // the gc.formula_name stamped on the acting bead's run root, empty when the
 // session has no acting bead, the bead or its root is gone, or the root was
@@ -415,8 +420,10 @@ func actingBeadID(meta map[string]string) string {
 // returns, so a tick that has nothing to record pays no read. The walk costs at
 // most two reads (the acting bead, then its root when that differs) and the
 // memo makes a warm lookup free. beads.ErrNotFound is the normal miss (a
-// purged or burned wisp) and is remembered; any other error leaves the label
-// empty, warns once for the batch, and is not remembered, so the fact is still
+// purged or burned wisp, or a bead in a rig that is not serving): it leaves the
+// label empty without a warning and is not remembered, so a bead that becomes
+// reachable later is attributed. Any other error leaves the label empty, warns
+// once for the batch, and is not remembered either, so the fact is still
 // emitted whole.
 func resolveFormulaName(resolve func(id string) (beads.Bead, error), memo *FormulaNameMemo, meta map[string]string, sessionID string) string {
 	actingID := actingBeadID(meta)
@@ -426,6 +433,9 @@ func resolveFormulaName(resolve func(id string) (beads.Bead, error), memo *Formu
 	name, err := memo.resolve(actingID, func() (string, error) {
 		return formulaOfActingBead(resolve, actingID)
 	})
+	if errors.Is(err, errFormulaBeadAbsent) {
+		return ""
+	}
 	if err != nil {
 		slog.Warn("usage attribution: formula lookup failed; recording the fact without a formula name",
 			slog.String("session_id", sessionID), slog.String("acting_bead_id", actingID), slog.Any("error", err))
@@ -440,7 +450,7 @@ func formulaOfActingBead(resolve func(id string) (beads.Bead, error), actingID s
 	acting, err := resolve(actingID)
 	if errors.Is(err, beads.ErrNotFound) {
 		slog.Debug("usage attribution: acting bead not found", slog.String("acting_bead_id", actingID))
-		return "", nil
+		return "", errFormulaBeadAbsent
 	}
 	if err != nil {
 		return "", fmt.Errorf("reading acting bead: %w", err)
@@ -453,7 +463,7 @@ func formulaOfActingBead(resolve func(id string) (beads.Bead, error), actingID s
 	if errors.Is(err, beads.ErrNotFound) {
 		slog.Debug("usage attribution: run root not found",
 			slog.String("acting_bead_id", actingID), slog.String("root_bead_id", rootID))
-		return "", nil
+		return "", errFormulaBeadAbsent
 	}
 	if err != nil {
 		return "", fmt.Errorf("reading run root %q: %w", rootID, err)

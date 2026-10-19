@@ -337,3 +337,40 @@ func TestFormulaBeadResolverBuildsTopologyLazilyAndOnce(t *testing.T) {
 		t.Fatalf("topology built %d times across four lookups, want exactly 1", builds)
 	}
 }
+
+// A pointer into a rig that is suspended at lookup time is unattributed, and
+// that miss is not remembered: once the rig resumes, the next batch through the
+// same runtime's memo is attributed.
+func TestLiveSweepPointerIntoResumedRigRecoversAttribution(t *testing.T) {
+	alpha := rigStoreFixture("AL-1")
+	step := slingGraphRun(t, alpha, "mol-in-resumed", "AL-1")
+
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	start := liveSweepStart()
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, codexSweepSessionKey, [][3]int{{150, 100, 50}})
+	h := newLiveSweepHarness(t, codexRoot, liveCodexSessionMeta(start, workDir, codexSweepSessionKey))
+	h.cr.cfg.Rigs = []config.Rig{{Name: "alpha", Path: t.TempDir(), Prefix: "gc", Suspended: true}}
+	h.cr.cs.beadStores = map[string]beads.Store{"alpha": alpha}
+
+	front := sessionFrontDoor(h.store)
+	info, err := front.Get(h.beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patch := recordCurrentBeadIDOnWake(info, front, step.ID, io.Discard); patch == nil {
+		t.Fatalf("reconciler wake stamp wrote nothing for %s", step.ID)
+	}
+
+	h.tick()
+	wantAllNamed(t, modelFactFormulaNames(t, h.sinkPath), "", 1)
+
+	h.cr.cfg.Rigs[0].Suspended = false
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, codexSweepSessionKey, [][3]int{{150, 100, 50}, {450, 200, 100}})
+	h.expireSweepThrottle()
+	h.tick()
+	got := modelFactFormulaNames(t, h.sinkPath)
+	if len(got) != 2 || got[0] != "" || got[1] != "mol-in-resumed" {
+		t.Fatalf("formula names across the resume = %q, want [\"\" \"mol-in-resumed\"]", got)
+	}
+}

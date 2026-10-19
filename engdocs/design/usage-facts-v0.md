@@ -72,9 +72,10 @@ record time from the controller-stamped pointer: the session's
 `gc.trigger_bead_id`. The pointer means "the last bead the controller stamped",
 not "the current bead", and it survives that bead's close. The resolver reads the
 acting bead, follows it to its run root, and takes the root's `gc.formula_name`.
-Accepted blind spots: the idle tail (a session's last bead is credited), a batch
-that spans a bead switch, compute facts, and plain non-formula work, all of which
-carry an empty name. Under-attribution is accepted; over-counting is not.
+Compute facts and plain non-formula work carry an empty name. The idle tail and a
+batch that spans a bead switch are credited to the formula behind the pointer at
+record time, so batch-level over-attribution to the later bead is possible and
+accepted as best-effort.
 
 ## Emission seams
 

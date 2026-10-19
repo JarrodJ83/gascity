@@ -9,8 +9,10 @@ const formulaNameMemoCap = 1024
 
 // FormulaNameMemo remembers the formula an acting bead's run was compiled
 // from, keyed by the acting bead id. An acting bead's run root never changes,
-// so a verdict stays valid for the life of the bead; an empty verdict ("not a
-// formula run", or a bead that no longer exists) is a verdict too.
+// so a verdict stays valid for the life of the bead. An empty verdict for a
+// root that was found but not compiled from a formula is cached too; a bead
+// that does not exist is not a verdict and is not cached, since it may be
+// reachable on a later lookup.
 //
 // Usage attribution runs on every controller tick and every prompt, and the
 // API builds a fresh Factory per request, so the memo must outlive the
